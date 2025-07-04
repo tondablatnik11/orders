@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 // Importy pro práci s datumy a časy
 import {
   format,
@@ -12,8 +12,8 @@ import {
   startOfMonth,
   endOfMonth,
   isAfter,
-  parseISO, // Přidáno pro parsování ISO dat z DB
-  addDays // Přidáno pro snazší práci s daty
+  parseISO,
+  addDays,
 } from "date-fns";
 // Importy pro grafy z Recharts
 import {
@@ -31,6 +31,9 @@ import {
   LineChart,
   Line,
   Sector,
+  AreaChart,
+  Area,
+  Brush,
 } from "recharts";
 // Importy ikon z Lucide React
 import {
@@ -48,17 +51,50 @@ import {
   Search,
   PieChart as PieChartIcon,
   LineChart as LineChartIcon,
-  XCircle, // Pro tlačítko zavřít v modalu
-  List, // Pro ikonu seznamu zakázek
+  XCircle,
+  List,
+  UserPlus,
+  Ticket,
+  Send,
+  CheckCircle,
+  Mail,
+  User, // Ikona pro profil
+  MessageSquare, // Ikona pro chat
+  Save, // Ikona pro uložení
 } from "lucide-react";
+// Import Supabase Client
+import { createClient } from '@supabase/supabase-js';
+// Firebase Imports
+import { initializeApp } from 'firebase/app';
+import {
+  getAuth,
+  signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
+  onAuthStateChanged,
+  signOut,
+  GoogleAuthProvider,
+  signInWithPopup,
+} from 'firebase/auth';
+import {
+  getFirestore,
+  collection,
+  addDoc,
+  query,
+  onSnapshot,
+  orderBy,
+  updateDoc,
+  doc,
+  getDoc,
+  setDoc,
+  deleteDoc,
+} from 'firebase/firestore';
 
-// Supabase Configuration
-// Poznámka: V produkčním prostředí byste tyto klíče měli spravovat bezpečněji (např. přes proměnné prostředí).
+// Supabase Configuration - For Vercel deployment, these should ideally also be environment variables.
 const SUPABASE_URL = "https://ucgiatobbjnqertgtmsw.supabase.co";
-const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVjZ2lhdG9iYmpucWVydGd0bXN3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTEzMTg1MjgsImxpIjoiMjA2Njg5NDUyOH0.EgqlPh4VHPsmHEII1snAmSDAxzs";
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVjZ2lhdG9iYmpucWVydGd0bXN3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTEzMTg1MjgsImV4cCI6MjA2Njg5NDUyOH0.EgqlPh4VHPsmHEII1snAmJgyZBp8rkf6u5N7SAxA4zs";
 
 // Globální instance Supabase klienta
-let supabaseClient = null;
+const supabaseClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // Jednoduché Card komponenty pro konzistentní stylování (Tailwind CSS)
 const Card = ({ children, className = "" }) => (
@@ -70,39 +106,39 @@ const CardContent = ({ children, className = "" }) => (
   <div className={`p-6 space-y-2 ${className}`}>{children}</div>
 );
 
-// Pomocná funkce pro parsování Excel datumů
-// Přesunuto mimo komponentu, aby se zabránilo nekonečné smyčce aktualizací
-const parseExcelDate = (excelDate) => {
-  if (typeof excelDate === "number") {
-    if (typeof window.XLSX === 'undefined' || typeof window.XLSX.SSF === 'undefined') {
-      console.error("XLSX.SSF not loaded. Cannot parse Excel date number.");
-      return null;
-    }
-    const parsed = window.XLSX.SSF.parse_date_code(excelDate);
-    return new Date(parsed.y, parsed.m - 1, parsed.d);
-  } else if (typeof excelDate === "string") {
-    // Zkusí parsovat formáty dd/MM/yyyy, dd.MM.yyyy, dd-MM-yyyy
-    const parts = excelDate.match(/(\d{1,2})[./-](\d{1,2})[./-](\d{4})/);
-    if (parts) {
-      // Měsíc je 0-indexovaný v JavaScriptu
-      return new Date(parseInt(parts[3]), parseInt(parts[2]) - 1, parseInt(parts[1]));
-    }
-    // Fallback pro jiné string formáty, které Date() umí parsovat (např. ISO string z DB)
+// Pomocná funkce pro parsování datumů (primárně ISO stringů z DB, fallback pro Excel čísla)
+const parseExcelDate = (dateInput) => {
+  if (typeof dateInput === "number" && typeof window.XLSX !== 'undefined' && typeof window.XLSX.SSF !== 'undefined') {
     try {
-      const isoParsed = parseISO(excelDate);
+      const parsed = window.XLSX.SSF.parse_date_code(dateInput);
+      const date = new Date(parsed.y, parsed.m - 1, parsed.d);
+      if (!isNaN(date.getTime())) return date;
+    } catch (e) {
+      console.warn("Failed to parse Excel date number:", dateInput, e);
+    }
+  } else if (typeof dateInput === "string") {
+    // Zkusí parsovat ISO string (z DB)
+    try {
+      const isoParsed = parseISO(dateInput);
       if (!isNaN(isoParsed.getTime())) return isoParsed;
     } catch (e) {
-      // Fallback to direct Date constructor if ISO parsing fails
+      // Fallback pro jiné string formáty, např. dd/MM/yyyy, dd.MM.yyyy
     }
-    return new Date(excelDate);
+    const parts = dateInput.match(/(\d{1,2})[./-](\d{1,2})[./-](\d{4})/);
+    if (parts) {
+      const date = new Date(parseInt(parts[3]), parseInt(parts[2]) - 1, parseInt(parts[1]));
+      if (!isNaN(date.getTime())) return date;
+    }
+    // Poslední pokus s Date konstruktorem
+    const directParsed = new Date(dateInput);
+    if (!isNaN(directParsed.getTime())) return directParsed;
   }
   return null;
 };
 
 // Helper function for getting current shift
-// Přesunuto mimo komponentu pro stabilitu
 const getCurrentShift = (date) => {
-  const hours = getHours(date);
+  const hours = date.getHours();
   const minutes = date.getMinutes();
 
   const shift1Start = 5 * 60 + 45;
@@ -120,7 +156,6 @@ const getCurrentShift = (date) => {
   }
   return null;
 };
-
 
 // Translation object pro více jazyků (Čeština, Angličtina, Němčina)
 const translations = {
@@ -208,7 +243,7 @@ const translations = {
     statusHistory: "Historie stavů",
     processingTime: "Doba zpracování",
     exportToXLSX: "Export do XLSX",
-    exportToCSV: "Export do CSV", // Nový překlad
+    exportToCSV: "Export do CSV",
     selectImportsToCompare: "Vyberte importy k porovnání",
     import1: "Import 1",
     import2: "Import 2",
@@ -225,22 +260,62 @@ const translations = {
     dashboardTab: "Dashboard",
     delayedOrdersTab: "Zpožděné zakázky",
     importComparisonTab: "Porovnání importů",
-    orderSearchTab: "Vyhledávání zakázek", // Nový překlad
+    orderSearchTab: "Vyhledávání zakázek",
     orderList: "Seznam zakázek",
     orderListFor: "Seznam zakázek pro",
     new_order: "Nová zakázka (status",
     removed_order: "Odstraněná zakázka (status",
     orders: "zakázek",
-    filterByNameOfShipToParty: "Filtrovat dle jména příjemce", // Nový překlad
+    filterByNameOfShipToParty: "Filtrovat dle jména příjemce",
     man: "MAN",
     daimler: "Daimler",
     volvo: "Volvo",
     iveco: "Iveco",
     scania: "Scania",
     daf: "DAF",
-    searchOrders: "Vyhledat zakázky", // Nový překlad
-    noOrdersFound: "Žádné zakázky nebyly nalezeny pro zadaná kritéria.", // Nový překlad
-    billOfLading: "Nákladní list", // Nový překlad
+    searchOrders: "Vyhledat zakázky",
+    noOrdersFound: "Žádné zakázky nebyly nalezeny pro zadaná kritéria.",
+    billOfLading: "Nákladní list",
+    selectDate: "Vyberte datum",
+    today: "Dnes",
+    yesterday: "Včera",
+    older: "Starší",
+    future: "Budoucí",
+    dailySummary: "Denní souhrn",
+    register: "Registrovat se",
+    registerTitle: "Registrace nového účtu",
+    registerSuccess: "Účet byl úspěšně vytvořen! Nyní se můžete přihlásit.",
+    registerError: "Chyba při registraci účtu:",
+    ticketsTab: "Tickety",
+    createTicket: "Vytvořit nový úkol",
+    ticketTitle: "Název úkolu",
+    ticketDescription: "Popis úkolu",
+    assignTo: "Přiřadit komu",
+    assignedTo: "Přiřazeno",
+    statusTicket: "Status",
+    createdBy: "Vytvořil",
+    createdAt: "Vytvořeno",
+    markAsCompleted: "Označit jako hotové",
+    open: "Otevřené",
+    completed: "Hotové",
+    noUsersFound: "Žádní uživatelé k přiřazení.",
+    ticketCreatedSuccess: "Úkol úspěšně vytvořen!",
+    ticketUpdateSuccess: "Úkol úspěšně aktualizován!",
+    ticketError: "Chyba při operaci s úkolem:",
+    all: "Vše",
+    googleSignIn: "Přihlásit se přes Google",
+    profileTab: "Profil",
+    yourName: "Vaše jméno",
+    yourFunction: "Vaše funkce",
+    saveProfile: "Uložit profil",
+    profileUpdated: "Profil úspěšně aktualizován!",
+    profileError: "Chyba při aktualizaci profilu:",
+    chatTab: "Chat",
+    sendMessage: "Odeslat zprávu",
+    noMessages: "Zatím žádné zprávy.",
+    typeMessage: "Napište svou zprávu...",
+    adminStatus: "Administrátor",
+    notAdminStatus: "Uživatel",
   },
   en: {
     title: "Order Overview",
@@ -359,6 +434,46 @@ const translations = {
     searchOrders: "Search Orders",
     noOrdersFound: "No orders found for the given criteria.",
     billOfLading: "Bill of lading",
+    selectDate: "Select Date",
+    today: "Today",
+    yesterday: "Yesterday",
+    older: "Older",
+    future: "Future",
+    dailySummary: "Daily Summary",
+    register: "Register",
+    registerTitle: "Register New Account",
+    registerSuccess: "Account created successfully! You can now log in.",
+    registerError: "Error registering account:",
+    ticketsTab: "Tickets",
+    createTicket: "Create New Ticket",
+    ticketTitle: "Ticket Title",
+    ticketDescription: "Ticket Description",
+    assignTo: "Assign To",
+    assignedTo: "Assigned To",
+    statusTicket: "Status",
+    createdBy: "Created By",
+    createdAt: "Created At",
+    markAsCompleted: "Mark as Completed",
+    open: "Open",
+    completed: "Completed",
+    noUsersFound: "No users found to assign.",
+    ticketCreatedSuccess: "Ticket created successfully!",
+    ticketUpdateSuccess: "Ticket updated successfully!",
+    ticketError: "Error performing ticket operation:",
+    all: "All",
+    googleSignIn: "Sign in with Google",
+    profileTab: "Profile",
+    yourName: "Your Name",
+    yourFunction: "Your Function",
+    saveProfile: "Save Profile",
+    profileUpdated: "Profile updated successfully!",
+    profileError: "Error updating profile:",
+    chatTab: "Chat",
+    sendMessage: "Send Message",
+    noMessages: "No messages yet.",
+    typeMessage: "Type your message...",
+    adminStatus: "Administrator",
+    notAdminStatus: "User",
   },
   de: {
     title: "Auftragsübersicht",
@@ -445,7 +560,7 @@ const translations = {
     processingTime: "Bearbeitungszeit",
     exportToXLSX: "Als XLSX exportieren",
     exportToCSV: "Als CSV exportieren",
-    selectImportsToCompare: "Importe zum Vergleich auswählen",
+    selectImportsToCompare: "Wählen Sie Importe zum Vergleich aus",
     import1: "Import 1",
     import2: "Import 2",
     compare: "Vergleichen",
@@ -475,33 +590,73 @@ const translations = {
     scania: "Scania",
     daf: "DAF",
     searchOrders: "Aufträge suchen",
-    noOrdersFound: "Keine Aufträge für die angegebenen Kriterien gefunden.",
+    noOrdersFound: "Keine Aufträge für die angegebenen Kriteria gefunden.",
     billOfLading: "Frachtbrief",
+    selectDate: "Datum auswählen",
+    today: "Heute",
+    yesterday: "Gestern",
+    older: "Älter",
+    future: "Zukunft",
+    dailySummary: "Tageszusammenfassung",
+    register: "Registrieren",
+    registerTitle: "Neues Konto registrieren",
+    registerSuccess: "Konto erfolgreich erstellt! Sie können sich jetzt anmelden.",
+    registerError: "Fehler bei der Kontoerstellung:",
+    ticketsTab: "Tickety",
+    createTicket: "Neues Ticket erstellen",
+    ticketTitle: "Ticket Titel",
+    ticketDescription: "Ticket Beschreibung",
+    assignTo: "Zuweisen an",
+    assignedTo: "Zugewiesen an",
+    statusTicket: "Status",
+    createdBy: "Erstellt von",
+    createdAt: "Erstellt am",
+    markAsCompleted: "Als abgeschlossen markieren",
+    open: "Offen",
+    completed: "Abgeschlossen",
+    noUsersFound: "Keine Benutzer zum Zuweisen gefunden.",
+    ticketCreatedSuccess: "Ticket erfolgreich erstellt!",
+    ticketUpdateSuccess: "Ticket erfolgreich aktualisiert!",
+    ticketError: "Fehler bei der Ticketoperation:",
+    all: "Alle",
+    googleSignIn: "Mit Google anmelden",
+    profileTab: "Profil",
+    yourName: "Ihr Name",
+    yourFunction: "Ihre Funktion",
+    saveProfile: "Profil speichern",
+    profileUpdated: "Profil erfolgreich aktualisiert!",
+    profileError: "Fehler beim Aktualisieren des Profils:",
+    chatTab: "Chat",
+    sendMessage: "Nachricht senden",
+    noMessages: "Noch keine Nachrichten.",
+    typeMessage: "Geben Sie Ihre Nachricht ein...",
+    adminStatus: "Administrator",
+    notAdminStatus: "Benutzer",
   },
 };
 
 // Definice konzistentní barevné palety pro grafy
 const CHART_COLORS = [
-  '#FFFFFF', // White (NEW for "Zakázky" total)
-  '#EF4444', // Red (Remaining)
-  '#3B82F6', // Lighter Blue (New Orders)
-  '#F59E0B', // Orange (In Progress)
-  '#10B981', // Green (Done)
-  '#3498DB', // Blue (for other general bars)
-  '#9B59B6', // Purple (available for others)
-  '#28A745', // Darker Green (Status 60)
-  '#218838', // Even Darker Green (Status 70)
-  '#FFC107', // Yellow (Status 31)
-  '#FF9800', // Darker Orange (Status 35)
-  '#FF5722', // Red-Orange (Status 40)
+  '#FFFFFF',
+  '#EF4444',
+  '#3B82F6',
+  '#F59E0B',
+  '#10B981',
+  '#3498DB',
+  '#9B59B6',
+  '#28A745',
+  '#218838',
+  '#FFC107',
+  '#FF9800',
+  '#FF5722',
 ];
 
 // Barvy pro kategorie dat v skládaných grafech
 const DATE_CATEGORY_COLORS = {
-  'Today': '#3498DB',     // Blue
-  'Yesterday': '#9B59B6', // Purple
-  'Older': '#E74C3C',     // Red
-  'Future': '#2ECC71',   // Green
+  'Today': '#3498DB',
+  'Yesterday': '#9B59B6',
+  'Older': '#E74C3C',
+  'Future': '#2ECC71',
 };
 
 // Mapování statusů na textové popisy pro porovnání importů
@@ -514,72 +669,647 @@ const STATUS_TRANSITIONS = {
   '60_to_70': 'onTheWay',
 };
 
+// Komponenta pro zobrazení detailů jedné zakázky
+const OrderDetailsModal = ({ order, onClose, onShowStatusHistory, onSaveNote, t }) => {
+  const [note, setNote] = useState(order.Note || '');
+
+  useEffect(() => {
+    setNote(order.Note || '');
+  }, [order.Note]);
+
+  const handleNoteBlur = () => {
+    if (note !== order.Note) {
+      onSaveNote(order["Delivery No"], note);
+    }
+  };
+
+  // Zajištění, že datum je platné před formátováním
+  let formattedLoadingDate = 'N/A';
+  if (order["Loading Date"]) {
+    try {
+      const parsedDate = parseISO(order["Loading Date"]);
+      if (!isNaN(parsedDate.getTime())) {
+        formattedLoadingDate = format(parsedDate, 'dd/MM/yyyy');
+      }
+    } catch (e) {
+      console.error("Error parsing loading date in OrderDetailsModal:", e, order["Loading Date"]);
+    }
+  }
+
+  return (
+    <Modal title={t.deliveryDetails} onClose={onClose}>
+      {order ? (
+        <div className="space-y-3 text-gray-200">
+          <p><strong>{t.deliveryNo}:</strong> {order["Delivery No"]}</p>
+          <p><strong>{t.status}:</strong> {order.Status}</p>
+          <p><strong>{t.deliveryType}:</strong> {order["del.type"]}</p>
+          <p><strong>{t.loadingDate}:</strong> {formattedLoadingDate}</p>
+          <p><strong>{t.forwardingAgent}:</strong> {order["Forwarding agent name"] || 'N/A'}</p>
+          <p><strong>{t.shipToPartyName}:</strong> {order["Name of ship-to party"] || 'N/A'}</p>
+          <p><strong>{t.totalWeight}:</strong> {order["Total Weight"] || 'N/A'}</p>
+          <p><strong>{t.billOfLading}:</strong> {order["Bill of lading"] || 'N/A'}</p>
+          <div>
+            <strong>{t.note}:</strong>
+            <input
+              type="text"
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              onBlur={handleNoteBlur}
+              className="w-full p-1 rounded-md bg-gray-600 border border-gray-500 text-gray-100 text-sm focus:ring-blue-500 focus:border-blue-500 mt-1"
+              placeholder={t.note}
+            />
+          </div>
+          {order.processingTime && <p><strong>{t.processingTime}:</strong> {order.processingTime}</p>}
+          <div className="mt-4 flex justify-end">
+            <button
+              onClick={() => onShowStatusHistory(order["Delivery No"])}
+              className="bg-blue-600 text-white px-4 py-2 rounded-lg shadow hover:bg-blue-700 transition-colors flex items-center gap-2"
+            >
+              <History className="w-5 h-5" /> {t.statusHistory}
+            </button>
+          </div>
+        </div>
+      ) : (
+        <p className="text-center text-gray-400">{t.deliveryNotFound}</p>
+      )}
+    </Modal>
+  );
+};
+
+// Komponenta pro modální okno
+const Modal = ({ title, children, onClose }) => (
+  <div className="fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center z-50 p-4">
+    <div className="bg-gray-800 rounded-xl shadow-2xl p-6 relative w-full max-w-3xl max-h-[90vh] overflow-y-auto">
+      <button
+        onClick={onClose}
+        className="absolute top-3 right-3 text-gray-400 hover:text-white transition-colors"
+        title="Close"
+      >
+        <XCircle className="w-6 h-6" />
+      </button>
+      <h2 className="text-2xl font-bold mb-4 text-blue-400 text-center">{title}</h2>
+      {children}
+    </div>
+  </div>
+);
+
+// Komponenta pro zobrazení seznamu zakázek v modalu
+const OrderListTable = ({ orders, onSelectOrder, t }) => (
+  <div className="overflow-x-auto mt-4">
+    {orders.length > 0 ? (
+      <table className="min-w-full bg-gray-700 rounded-lg overflow-hidden">
+        <thead className="bg-gray-600">
+          <tr>
+            <th className="py-3 px-4 text-left text-sm font-semibold text-gray-100">{t.deliveryNo}</th>
+            <th className="py-3 px-4 text-left text-sm font-semibold text-gray-100">{t.status}</th>
+            <th className="py-3 px-4 text-left text-sm font-semibold text-gray-100">{t.deliveryType}</th>
+            <th className="py-3 px-4 text-left text-sm font-semibold text-gray-100">{t.loadingDate}</th>
+            <th className="py-3 px-4 text-left text-sm font-semibold text-gray-100">{t.forwardingAgent}</th>
+            <th className="py-3 px-4 text-left text-sm font-semibold text-gray-100">{t.shipToPartyName}</th>
+            <th className="py-3 px-4 text-left text-sm font-semibold text-gray-100">{t.totalWeight}</th>
+            <th className="py-3 px-4 text-left text-sm font-semibold text-gray-100">{t.billOfLading}</th>
+            <th className="py-3 px-4 text-left text-sm font-semibold text-gray-100">{t.note}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {orders.map((order, index) => {
+            let formattedLoadingDate = 'N/A';
+            if (order["Loading Date"]) {
+              try {
+                const parsedDate = parseISO(order["Loading Date"]);
+                if (!isNaN(parsedDate.getTime())) {
+                  formattedLoadingDate = format(parsedDate, 'dd/MM/yyyy');
+                }
+              } catch (e) {
+                console.error("Error parsing loading date in OrderListTable:", e, order["Loading Date"]);
+              }
+            }
+            return (
+              <tr
+                key={order["Delivery No"] || index}
+                className={`border-t border-gray-600 cursor-pointer ${index % 2 === 0 ? "bg-gray-750" : "bg-gray-700"} hover:bg-gray-600 transition-colors`}
+                onClick={() => onSelectOrder(order)}
+              >
+                <td className="py-3 px-4 text-gray-200">{order["Delivery No"]}</td>
+                <td className="py-3 px-4 text-gray-200">{order.Status}</td>
+                <td className="py-3 px-4 text-gray-200">{order["del.type"]}</td>
+                <td className="py-3 px-4 text-gray-200">{formattedLoadingDate}</td>
+                <td className="py-3 px-4 text-gray-200">{order["Forwarding agent name"] || 'N/A'}</td>
+                <td className="py-3 px-4 text-gray-200">{order["Name of ship-to party"] || 'N/A'}</td>
+                <td className="py-3 px-4 text-gray-200">{order["Total Weight"] || 'N/A'}</td>
+                <td className="py-3 px-4 text-gray-200">{order["Bill of lading"] || 'N/A'}</td>
+                <td className="py-3 px-4 text-gray-200">{order.Note || 'N/A'}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    ) : (
+      <p className="text-center text-gray-400">{t.noDataAvailable}</p>
+    )}
+  </div>
+);
+
+// Komponenta pro ticketovací systém
+const TicketsTab = ({ t, currentUser, allUsers, db, appId }) => { // Pass db and appId as props
+  const [tickets, setTickets] = useState([]);
+  const [newTicketTitle, setNewTicketTitle] = useState('');
+  const [newTicketDescription, setNewTicketDescription] = useState('');
+  const [newTicketAssignee, setNewTicketAssignee] = useState('');
+  const [ticketMessage, setTicketMessage] = useState('');
+  const [ticketMessageType, setTicketMessageType] = useState(''); // 'success' or 'error'
+
+  useEffect(() => {
+    if (!db || !appId) {
+      console.warn("Firestore or App ID not available for tickets tab.");
+      return;
+    }
+
+    const ticketsColRef = collection(db, `artifacts/${appId}/public/data/tickets`);
+    const q = query(ticketsColRef, orderBy('createdAt', 'desc'));
+
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const fetchedTickets = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data(),
+      }));
+      setTickets(fetchedTickets);
+    }, (error) => {
+      console.error("Error fetching tickets:", error);
+      setTicketMessage(`${t.ticketError} ${error.message}`);
+      setTicketMessageType('error');
+    });
+
+    return () => unsubscribe();
+  }, [db, appId, t]); // Add db and appId to dependencies
+
+  const handleCreateTicket = async (e) => {
+    e.preventDefault();
+    if (!db || !appId || !newTicketTitle || !newTicketDescription || !newTicketAssignee || !currentUser) {
+      setTicketMessage(`${t.ticketError} Vyplňte všechna pole a ujistěte se, že jste přihlášeni.`);
+      setTicketMessageType('error');
+      return;
+    }
+
+    try {
+      await addDoc(collection(db, `artifacts/${appId}/public/data/tickets`), {
+        title: newTicketTitle,
+        description: newTicketDescription,
+        assignedTo: newTicketAssignee,
+        status: 'Open',
+        createdBy: currentUser.uid,
+        createdByName: currentUser.email, // Store name for display
+        createdAt: new Date().toISOString(),
+      });
+      setNewTicketTitle('');
+      setNewTicketDescription('');
+      setNewTicketAssignee('');
+      setTicketMessage(t.ticketCreatedSuccess);
+      setTicketMessageType('success');
+    } catch (error) {
+      console.error("Error creating ticket:", error);
+      setTicketMessage(`${t.ticketError} ${error.message}`);
+      setTicketMessageType('error');
+    }
+  };
+
+  const handleMarkAsCompleted = async (ticketId) => {
+    if (!db || !appId) {
+      setTicketMessage(`${t.ticketError} Firestore není inicializován.`);
+      setTicketMessageType('error');
+      return;
+    }
+    try {
+      const ticketRef = doc(db, `artifacts/${appId}/public/data/tickets`, ticketId);
+      await updateDoc(ticketRef, {
+        status: 'Completed',
+        completedAt: new Date().toISOString(),
+      });
+      setTicketMessage(t.ticketUpdateSuccess);
+      setTicketMessageType('success');
+    } catch (error) {
+      console.error("Error updating ticket status:", error);
+      setTicketMessage(`${t.ticketError} ${error.message}`);
+      setTicketMessageType('error');
+    }
+  };
+
+  return (
+    <Card>
+      <CardContent>
+        <h2 className="text-2xl font-semibold mb-4 flex items-center gap-2 text-purple-400">
+          <Ticket className="w-6 h-6" /> {t.ticketsTab}
+        </h2>
+
+        {ticketMessage && (
+          <div className={`p-3 mb-4 rounded-md text-sm ${ticketMessageType === 'success' ? 'bg-green-800 text-green-100' : 'bg-red-800 text-red-100'}`}>
+            {ticketMessage}
+          </div>
+        )}
+
+        <form onSubmit={handleCreateTicket} className="space-y-4 mb-8 p-4 border border-gray-700 rounded-lg bg-gray-750">
+          <h3 className="text-xl font-semibold text-blue-300 mb-3">{t.createTicket}</h3>
+          <div>
+            <label htmlFor="ticket-title" className="block text-sm font-medium text-gray-300 mb-1">{t.ticketTitle}:</label>
+            <input
+              type="text"
+              id="ticket-title"
+              value={newTicketTitle}
+              onChange={(e) => setNewTicketTitle(e.target.value)}
+              className="w-full p-2 rounded-md bg-gray-600 border border-gray-500 text-gray-100 focus:ring-blue-500 focus:border-blue-500"
+              placeholder={t.ticketTitle}
+            />
+          </div>
+          <div>
+            <label htmlFor="ticket-description" className="block text-sm font-medium text-gray-300 mb-1">{t.ticketDescription}:</label>
+            <textarea
+              id="ticket-description"
+              value={newTicketDescription}
+              onChange={(e) => setNewTicketDescription(e.target.value)}
+              className="w-full p-2 rounded-md bg-gray-600 border border-gray-500 text-gray-100 focus:ring-blue-500 focus:border-blue-500 h-24 resize-y"
+              placeholder={t.ticketDescription}
+            />
+          </div>
+          <div>
+            <label htmlFor="ticket-assignee" className="block text-sm font-medium text-gray-300 mb-1">{t.assignTo}:</label>
+            <select
+              id="ticket-assignee"
+              value={newTicketAssignee}
+              onChange={(e) => setNewTicketAssignee(e.target.value)}
+              className="w-full p-2 rounded-md bg-gray-600 border border-gray-500 text-gray-100 focus:ring-blue-500 focus:border-blue-500"
+            >
+              <option value="">{t.selectImport}</option> {/* Reusing selectImport for "Select User" */}
+              {allUsers.length > 0 ? (
+                allUsers.map(user => (
+                  <option key={user.uid} value={user.uid}>
+                    {user.email} ({user.displayName || 'N/A'})
+                  </option>
+                ))
+              ) : (
+                <option value="" disabled>{t.noUsersFound}</option>
+              )}
+            </select>
+          </div>
+          <button
+            type="submit"
+            className="w-full bg-blue-600 text-white px-4 py-2 rounded-lg shadow hover:bg-blue-700 transition-colors flex items-center justify-center gap-2"
+          >
+            <Send className="w-5 h-5" /> {t.createTicket}
+          </button>
+        </form>
+
+        <h3 className="text-xl font-semibold text-white mb-3">Seznam úkolů</h3>
+        <div className="overflow-x-auto">
+          {tickets.length > 0 ? (
+            <table className="min-w-full bg-gray-700 rounded-lg overflow-hidden">
+              <thead className="bg-gray-600">
+                <tr>
+                  <th className="py-3 px-4 text-left text-sm font-semibold text-gray-100">{t.ticketTitle}</th>
+                  <th className="py-3 px-4 text-left text-sm font-semibold text-gray-100">{t.ticketDescription}</th>
+                  <th className="py-3 px-4 text-left text-sm font-semibold text-gray-100">{t.assignedTo}</th>
+                  <th className="py-3 px-4 text-left text-sm font-semibold text-gray-100">{t.statusTicket}</th>
+                  <th className="py-3 px-4 text-left text-sm font-semibold text-gray-100">{t.createdBy}</th>
+                  <th className="py-3 px-4 text-left text-sm font-semibold text-gray-100">{t.createdAt}</th>
+                  <th className="py-3 px-4 text-left text-sm font-semibold text-gray-100">Akce</th>
+                </tr>
+              </thead>
+              <tbody>
+                {tickets.map((ticket, index) => (
+                  <tr key={ticket.id} className={`border-t border-gray-600 ${index % 2 === 0 ? "bg-gray-750" : "bg-gray-700"}`}>
+                    <td className="py-3 px-4 text-gray-200">{ticket.title}</td>
+                    <td className="py-3 px-4 text-gray-200 text-sm">{ticket.description}</td>
+                    <td className="py-3 px-4 text-gray-200">
+                      {allUsers.find(u => u.uid === ticket.assignedTo)?.displayName || ticket.assignedTo}
+                    </td>
+                    <td className="py-3 px-4 text-gray-200">
+                      <span className={`px-2 py-1 rounded-full text-xs font-semibold ${
+                        ticket.status === 'Open' ? 'bg-red-600 text-white' : 'bg-green-600 text-white'
+                      }`}>
+                        {ticket.status === 'Open' ? t.open : t.completed}
+                      </span>
+                    </td>
+                    <td className="py-3 px-4 text-gray-200 text-sm">{allUsers.find(u => u.uid === ticket.createdBy)?.displayName || ticket.createdByName || 'N/A'}</td>
+                    <td className="py-3 px-4 text-gray-200 text-sm">{format(parseISO(ticket.createdAt), 'dd/MM/yyyy HH:mm')}</td>
+                    <td className="py-3 px-4">
+                      {ticket.status === 'Open' && currentUser && ticket.assignedTo === currentUser.uid && (
+                        <button
+                          onClick={() => handleMarkAsCompleted(ticket.id)}
+                          className="bg-green-600 text-white px-3 py-1 rounded-md text-sm hover:bg-green-700 transition-colors flex items-center gap-1"
+                        >
+                          <CheckCircle className="w-4 h-4" /> {t.markAsCompleted}
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : (
+            <p className="text-center text-gray-400">{t.noDataAvailable}</p>
+          )}
+        </div>
+      </CardContent>
+    </Card>
+  );
+};
+
+// Komponenta pro nastavení profilu
+const ProfileSettingsTab = ({ t, currentUser, currentUserProfile, updateUserProfile, db, appId }) => {
+  const [displayName, setDisplayName] = useState('');
+  const [userFunction, setUserFunction] = useState('');
+  const [profileMessage, setProfileMessage] = useState('');
+  const [profileMessageType, setProfileMessageType] = useState('');
+
+  useEffect(() => {
+    if (currentUserProfile) {
+      setDisplayName(currentUserProfile.displayName || '');
+      setUserFunction(currentUserProfile.function || '');
+    }
+  }, [currentUserProfile]);
+
+  const handleSaveProfile = async () => {
+    if (!currentUser || !db || !appId) {
+      setProfileMessage(`${t.profileError} Uživatel není přihlášen nebo Firebase není inicializován.`);
+      setProfileMessageType('error');
+      return;
+    }
+    try {
+      await updateUserProfile(currentUser.uid, {
+        displayName: displayName,
+        function: userFunction,
+      });
+      setProfileMessage(t.profileUpdated);
+      setProfileMessageType('success');
+    } catch (error) {
+      console.error("Error saving profile:", error);
+      setProfileMessage(`${t.profileError} ${error.message}`);
+      setProfileMessageType('error');
+    }
+  };
+
+  return (
+    <Card>
+      <CardContent>
+        <h2 className="text-2xl font-semibold mb-4 flex items-center gap-2 text-yellow-400">
+          <User className="w-6 h-6" /> {t.profileTab}
+        </h2>
+
+        {profileMessage && (
+          <div className={`p-3 mb-4 rounded-md text-sm ${profileMessageType === 'success' ? 'bg-green-800 text-green-100' : 'bg-red-800 text-red-100'}`}>
+            {profileMessage}
+          </div>
+        )}
+
+        <div className="space-y-4">
+          <div>
+            <label htmlFor="email" className="block text-sm font-medium text-gray-300 mb-1">Email:</label>
+            <input
+              type="email"
+              id="email"
+              value={currentUser?.email || ''}
+              readOnly
+              className="w-full p-2 rounded-md bg-gray-700 border border-gray-600 text-gray-400 cursor-not-allowed"
+            />
+          </div>
+          <div>
+            <label htmlFor="display-name" className="block text-sm font-medium text-gray-300 mb-1">{t.yourName}:</label>
+            <input
+              type="text"
+              id="display-name"
+              value={displayName}
+              onChange={(e) => setDisplayName(e.target.value)}
+              className="w-full p-2 rounded-md bg-gray-600 border border-gray-500 text-gray-100 focus:ring-blue-500 focus:border-blue-500"
+              placeholder={t.yourName}
+            />
+          </div>
+          <div>
+            <label htmlFor="user-function" className="block text-sm font-medium text-gray-300 mb-1">{t.yourFunction}:</label>
+            <input
+              type="text"
+              id="user-function"
+              value={userFunction}
+              onChange={(e) => setUserFunction(e.target.value)}
+              className="w-full p-2 rounded-md bg-gray-600 border border-gray-500 text-gray-100 focus:ring-blue-500 focus:border-blue-500"
+              placeholder={t.yourFunction}
+            />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-300 mb-1">Status:</label>
+            <p className="text-gray-200">
+              {currentUserProfile?.isAdmin ? (
+                <span className="text-green-400 font-semibold">{t.adminStatus}</span>
+              ) : (
+                <span className="text-blue-400 font-semibold">{t.notAdminStatus}</span>
+              )}
+            </p>
+          </div>
+          <button
+            onClick={handleSaveProfile}
+            className="w-full bg-blue-600 text-white px-4 py-2 rounded-lg shadow hover:bg-blue-700 transition-colors flex items-center justify-center gap-2"
+          >
+            <Save className="w-5 h-5" /> {t.saveProfile}
+          </button>
+        </div>
+      </CardContent>
+    </Card>
+  );
+};
+
+// Komponenta pro globální chat
+const ChatTab = ({ t, currentUser, currentUserProfile, db, appId }) => {
+  const [messages, setMessages] = useState([]);
+  const [newMessage, setNewMessage] = useState('');
+  const messagesEndRef = useRef(null);
+
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  };
+
+  useEffect(() => {
+    if (!db || !appId) {
+      console.warn("Firestore or App ID not available for chat tab.");
+      return;
+    }
+
+    const chatColRef = collection(db, `artifacts/${appId}/public/data/chat_messages`);
+    const q = query(chatColRef, orderBy('timestamp', 'asc'));
+
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const fetchedMessages = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data(),
+      }));
+      setMessages(fetchedMessages);
+    }, (error) => {
+      console.error("Error fetching chat messages:", error);
+    });
+
+    return () => unsubscribe();
+  }, [db, appId]);
+
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages]);
+
+  const handleSendMessage = async (e) => {
+    e.preventDefault();
+    if (!db || !appId || !newMessage.trim() || !currentUser) {
+      return;
+    }
+
+    try {
+      await addDoc(collection(db, `artifacts/${appId}/public/data/chat_messages`), {
+        senderId: currentUser.uid,
+        senderName: currentUserProfile?.displayName || currentUser.email,
+        messageText: newMessage.trim(),
+        timestamp: new Date().toISOString(),
+      });
+      setNewMessage('');
+    } catch (error) {
+      console.error("Error sending message:", error);
+    }
+  };
+
+  return (
+    <Card>
+      <CardContent className="flex flex-col h-[70vh]">
+        <h2 className="text-2xl font-semibold mb-4 flex items-center gap-2 text-green-400">
+          <MessageSquare className="w-6 h-6" /> {t.chatTab}
+        </h2>
+
+        <div className="flex-grow overflow-y-auto p-4 bg-gray-700 rounded-lg mb-4 space-y-3 custom-scrollbar">
+          {messages.length > 0 ? (
+            messages.map((msg) => (
+              <div key={msg.id} className={`flex ${msg.senderId === currentUser?.uid ? 'justify-end' : 'justify-start'}`}>
+                <div className={`max-w-[70%] p-3 rounded-lg shadow-md ${msg.senderId === currentUser?.uid ? 'bg-blue-600 text-white' : 'bg-gray-600 text-gray-100'}`}>
+                  <p className="font-semibold text-sm mb-1">
+                    {msg.senderId === currentUser?.uid ? 'Vy' : msg.senderName}
+                  </p>
+                  <p>{msg.messageText}</p>
+                  <p className="text-xs text-gray-300 mt-1">
+                    {format(parseISO(msg.timestamp), 'dd/MM HH:mm')}
+                  </p>
+                </div>
+              </div>
+            ))
+          ) : (
+            <p className="text-center text-gray-400">{t.noMessages}</p>
+          )}
+          <div ref={messagesEndRef} />
+        </div>
+
+        <form onSubmit={handleSendMessage} className="flex gap-2">
+          <input
+            type="text"
+            value={newMessage}
+            onChange={(e) => setNewMessage(e.target.value)}
+            className="flex-grow p-3 rounded-lg bg-gray-700 border border-gray-600 text-gray-100 focus:ring-blue-500 focus:border-blue-500"
+            placeholder={t.typeMessage}
+            disabled={!currentUser}
+          />
+          <button
+            type="submit"
+            className="bg-blue-600 text-white px-5 py-3 rounded-lg shadow hover:bg-blue-700 transition-colors flex items-center gap-2"
+            disabled={!currentUser || !newMessage.trim()}
+          >
+            <Send className="w-5 h-5" /> {t.sendMessage}
+          </button>
+        </form>
+      </CardContent>
+    </Card>
+  );
+};
+
 
 export default function ZakazkyDashboard() {
+  // Stavy pro UI
   const [lang, setLang] = useState("cz");
   const [darkMode, setDarkMode] = useState(true);
-  const [rawExcelData, setRawExcelData] = useState([]); // Uchovává původní, nefiltrovaná data
-  const [summary, setSummary] = useState(null); // Zpracovaná souhrnná data na základě aktuálních filtrů
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [username, setUsername] = useState("");
-  const [password, setPassword] = useState("");
-  const [loginError, setLoginError] = useState("");
-  const [importHistory, setImportHistory] = useState([]);
-  const [selectedImportId, setSelectedImportId] = useState(null);
+  const [activeTab, setActiveTab] = useState(0); // 0: Dashboard, 1: Delayed, 2: Comparison, 3: Search, 4: Daily Summary, 5: Tickets, 6: Profile, 7: Chat
+  const [filtersCollapsed, setFiltersCollapsed] = useState(true);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [itemToDeleteId, setItemToDeleteId] = useState(null);
   const [showAllDelayed, setShowAllDelayed] = useState(false);
-  // Deklarace isScriptsLoaded state
-  const [isScriptsLoaded, setIsScriptsLoaded] = useState(false);
-  
-  // States for the new Order Search tab
-  const [searchDeliveryNo, setSearchDeliveryNo] = useState("");
-  const [searchLoadingDate, setSearchLoadingDate] = useState("");
-  const [searchStatus, setSearchStatus] = useState("all");
-  const [searchShipToPartyName, setSearchShipToPartyName] = useState("all");
-  const [searchOrdersResult, setSearchOrdersResult] = useState([]);
-  // const [showSearchOrdersModal, setShowSearchOrdersModal] = useState(false); // Replaced by selectedOrderDetails
-  const [searchModalTitle, setSearchModalTitle] = useState("");
 
+  // Stavy pro data
+  const [allOrdersData, setAllOrdersData] = useState([]);
+  const [summary, setSummary] = useState(null);
+  const [importHistory, setImportHistory] = useState([]);
+  const [selectedImportId, setSelectedImportId] = useState(null);
+
+  // Stavy pro grafy
+  const [ordersOverTimeData, setOrdersOverTimeData] = useState([]);
+  const [inProgressOnlyData, setInProgressOnlyData] = useState([]);
+  const [shipmentsData, setShipmentsData] = useState([]);
+  const [shiftComparisonData, setShiftComparisonData] = useState([]);
+  const [deliveryTypePieData, setDeliveryTypePieData] = useState([]);
+  const [deliveryTypeStackedChartData, setDeliveryTypeStackedChartData] = useState([]);
+
+  // Stavy pro interaktivitu grafů
+  const [chartTypeOrdersOverTime, setChartTypeOrdersOverTime] = useState('bar');
+  const [chartTypeOrderTypes, setChartTypeOrderTypes] = useState('bar');
+  const [chartTypeStatus, setChartTypeStatus] = useState('stackedBar'); // Default na 'stackedBar'
+  const [activeIndexStatus, setActiveIndexStatus] = useState(0);
+  const [activeIndexDelivery, setActiveIndexDelivery] = useState(0);
 
   // Stavy pro filtry
-  const [filtersCollapsed, setFiltersCollapsed] = useState(true);
   const [filterTimeRange, setFilterTimeRange] = useState('all');
   const [filterStartDate, setFilterStartDate] = useState('');
   const [filterEndDate, setFilterEndDate] = useState('');
   const [filterDeliveryType, setFilterDeliveryType] = useState('all');
   const [filterStatus, setFilterStatus] = useState('all');
 
-  // Stavy pro typy grafů (pro přepínání)
-  const [chartTypeOrdersOverTime, setChartTypeOrdersOverTime] = useState('stackedBar'); // Změněno na 'stackedBar'
-  const [chartTypeOrderTypes, setChartTypeOrderTypes] = useState('bar');
+  // Stavy pro přihlášení a načítání
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [isClient, setIsClient] = useState(false); // Nový stav pro kontrolu, zda běží na klientovi
+  const [isLoadingData, setIsLoadingData] = useState(true); // Default na true, aby se zobrazil loading
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [loginError, setLoginError] = useState("");
+  const [isRegistering, setIsRegistering] = useState(false); // Nový stav pro přepínání mezi login/register
+  const [registerMessage, setRegisterMessage] = useState('');
+  const [currentUser, setCurrentUser] = useState(null); // Firebase User object
+  const [currentUserProfile, setCurrentUserProfile] = useState(null); // User profile from Firestore
+  const [allUsers, setAllUsers] = useState([]); // List of all registered users for ticket assignment
 
-  // Stavy pro modální okno se seznamem zakázek (po kliknutí na karty)
+  // Firebase Instances as state
+  const [firebaseAuth, setFirebaseAuth] = useState(null);
+  const [firestoreDb, setFirestoreDb] = useState(null);
+  const [currentAppId, setCurrentAppId] = useState(null); // App ID from Firebase config
+  const [isFirebaseReady, setIsFirebaseReady] = useState(false); // New state for Firebase readiness
+
+  // Stavy pro modální okna
   const [showOrderListModal, setShowOrderListModal] = useState(false);
   const [modalOrders, setModalOrders] = useState([]);
   const [modalTitle, setModalTitle] = useState('');
-
-  // Stavy pro modální okno historie statusů
+  const [selectedOrderDetails, setSelectedOrderDetails] = useState(null);
   const [showStatusHistoryModal, setShowStatusHistoryModal] = useState(false);
   const [currentDeliveryNo, setCurrentDeliveryNo] = useState(null);
   const [deliveryStatusLog, setDeliveryStatusLog] = useState([]);
 
   // Stavy pro porovnání importů
-  const [activeTab, setActiveTab] = useState(0); // 0: Dashboard, 1: Zpožděné, 2: Porovnání, 3: Vyhledávání zakázek
-
   const [compareImport1Id, setCompareImport1Id] = useState('');
   const [compareImport2Id, setCompareImport2Id] = useState('');
-  const [comparisonResults, setComparisonResults] = useState([]);
+  const [comparisonResults, setComparisonResults] = useState(null);
 
+  // Stavy pro vyhledávání objednávek
+  const [searchDeliveryNo, setSearchDeliveryNo] = useState("");
+  const [searchLoadingDate, setSearchLoadingDate] = useState("");
+  const [searchStatus, setSearchStatus] = useState("all");
+  const [searchShipToPartyName, setSearchShipToPartyName] = useState("all");
+  const [searchOrdersResult, setSearchOrdersResult] = useState([]);
 
-  // Nový stav pro zobrazení detailů jedné zakázky v modalu
-  const [selectedOrderDetails, setSelectedOrderDetails] = useState(null);
+  // Stavy pro výběr data v denním souhrnu
+  const [selectedDailySummaryDate, setSelectedDailySummaryDate] = useState('');
+  const [availableDatesForSummary, setAvailableDatesForSummary] = useState([]);
 
+  // Reference na překladový objekt
+  const t = translations[lang];
 
-  const t = translations[lang]; // Objekt pro překlady
-
-  // Dynamické načítání externích skriptů (XLSX, jsPDF, html2canvas, Supabase JS)
+  // Dynamické načítání externích skriptů (XLSX, jsPDF, html2canvas)
   useEffect(() => {
+    setIsClient(true);
+
     const loadScript = (src, id, onloadCallback) => {
       if (document.getElementById(id)) {
         if (onloadCallback) onloadCallback();
@@ -593,70 +1323,153 @@ export default function ZakazkyDashboard() {
       document.head.appendChild(script);
     };
 
-    // Načítání Supabase JS jako první, protože je potřeba pro inicializaci klienta
-    loadScript('https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2', 'supabase-js-script', () => {
-      console.log('Supabase JS loaded');
-      if (window.supabase && !supabaseClient) {
-        supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-        console.log('Supabase client initialized');
-      }
-      // Po načtení Supabase JS načteme ostatní skripty
-      loadScript('https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js', 'xlsx-script', () => {
-        console.log('XLSX loaded');
-        loadScript('https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js', 'jspdf-script', () => {
-          console.log('jsPDF loaded');
-          loadScript('https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js', 'html2canvas-script', () => {
-            console.log('html2canvas loaded');
-            setIsScriptsLoaded(true); // Set true when all essential scripts are loaded
-          });
+    loadScript('https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js', 'xlsx-script', () => {
+      console.log('XLSX loaded');
+      loadScript('https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js', 'jspdf-script', () => {
+        console.log('jsPDF loaded');
+        loadScript('https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js', 'html2canvas-script', () => {
+          console.log('html2canvas loaded');
         });
       });
     });
-    return () => {
-      // Cleanup skriptů, pokud je potřeba (např. při odmontování komponenty)
-      // Pro jednoduchost zde není implementováno, ale v komplexní aplikaci by bylo vhodné
-    };
-  }, []); // Prázdné pole závislostí zajistí, že se spustí pouze jednou při mountu
 
+    // Firebase Initialization using environment variables
+    try {
+      const firebaseConfig = {
+        apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
+        authDomain: process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN,
+        projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID,
+        storageBucket: process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET,
+        messagingSenderId: process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
+        appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID,
+        measurementId: process.env.NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID // Optional
+      };
+
+      // Check if all necessary config values are present
+      const requiredConfig = ['apiKey', 'authDomain', 'projectId', 'appId'];
+      const isConfigComplete = requiredConfig.every(key => firebaseConfig[key]);
+
+      if (isConfigComplete) {
+        const app = initializeApp(firebaseConfig);
+        const authInstance = getAuth(app);
+        const dbInstance = getFirestore(app);
+        const appIdValue = firebaseConfig.appId; // Use the appId from config
+
+        setFirebaseAuth(authInstance);
+        setFirestoreDb(dbInstance);
+        setCurrentAppId(appIdValue);
+
+        // Initial Firebase Auth state listener
+        onAuthStateChanged(authInstance, async (user) => {
+          if (user) {
+            setCurrentUser(user);
+            setIsAuthenticated(true);
+            console.log("Firebase Auth: User is signed in:", user.email, user.uid);
+
+            // Fetch or create user profile
+            const userProfileRef = doc(dbInstance, `artifacts/${appIdValue}/public/data/user_profiles`, user.uid);
+            const userProfileSnap = await getDoc(userProfileRef);
+
+            if (userProfileSnap.exists()) {
+              setCurrentUserProfile(userProfileSnap.data());
+            } else {
+              // Create a basic profile if it doesn't exist
+              const newProfile = {
+                email: user.email,
+                displayName: user.email.split('@')[0], // Default display name
+                function: '',
+                isAdmin: false, // Default to not admin
+                createdAt: new Date().toISOString(),
+              };
+              await setDoc(userProfileRef, newProfile);
+              setCurrentUserProfile(newProfile);
+              console.log("New user profile created in Firestore.");
+            }
+
+            // Fetch all user profiles for assignment dropdown and chat
+            const userProfilesCollectionRef = collection(dbInstance, `artifacts/${appIdValue}/public/data/user_profiles`);
+            onSnapshot(userProfilesCollectionRef, (snapshot) => {
+              const users = snapshot.docs.map(doc => ({
+                uid: doc.id,
+                ...doc.data(),
+              }));
+              setAllUsers(users);
+            }, (error) => {
+              console.error("Error fetching all user profiles:", error);
+            });
+
+          } else {
+            setCurrentUser(null);
+            setCurrentUserProfile(null);
+            setIsAuthenticated(false);
+            setAllUsers([]);
+            console.log("Firebase Auth: No user is signed in.");
+          }
+          setIsLoadingData(false); // Stop loading after initial auth check
+          setIsFirebaseReady(true); // Firebase is ready after initial auth check
+        });
+
+      } else {
+        console.warn("Firebase configuration is incomplete. Firebase features will not be available. Please set NEXT_PUBLIC_FIREBASE_* environment variables.");
+        setIsLoadingData(false);
+        setIsFirebaseReady(false); // Firebase is not ready if config is missing
+      }
+    } catch (e) {
+      console.error("Error initializing Firebase:", e);
+      setIsLoadingData(false);
+      setIsFirebaseReady(false); // Firebase is not ready if initialization fails
+    }
+
+  }, []); // Empty dependency array to run only once on mount
+
+  // Funkce pro aktualizaci uživatelského profilu
+  const updateUserProfile = useCallback(async (uid, updates) => {
+    if (!firestoreDb || !currentAppId) {
+      throw new Error("Firestore or App ID not available.");
+    }
+    const userProfileRef = doc(firestoreDb, `artifacts/${currentAppId}/public/data/user_profiles`, uid);
+    await updateDoc(userProfileRef, updates);
+    // Update local state after successful update
+    setCurrentUserProfile(prev => ({ ...prev, ...updates }));
+  }, [firestoreDb, currentAppId]);
 
   // Hlavní logika zpracování dat (nyní přijímá již filtrované řádky)
-  const processData = useCallback((rows) => {
+  const processData = useCallback((rawData) => {
     const now = new Date();
     const today = startOfDay(now);
-    const currentShift = getCurrentShift(now);
-
-    // Dny pro souhrnné karty (Včera, Dnes, Zítra, Pozítří)
-    const dayOffsets = [-1, 0, 1, 2];
 
     const result = {
-      totalToday: 0,
-      statusCounts: {},
-      byDay: {},
-      deliveryTypes: {},
-      delayed: 0,
-      inProgress: 0,
+      total: 0,
       doneTotal: 0,
       remainingTotal: 0,
-      newOrders: 0,
+      inProgressTotal: 0,
+      newOrdersTotal: 0,
+      palletsTotal: 0,
+      cartonsTotal: 0,
+      statusCounts: {},
+      dailySummaries: [],
+      deliveryTypes: {},
+      delayed: 0,
       sentPallets: 0,
       sentCartons: 0,
-      delayedOrdersList: [],
-      currentShift: currentShift,
+      currentShift: getCurrentShift(now),
       hourlyStatusSnapshots: {},
       shiftDoneCounts: { '1': 0, '2': 0 },
-      statusByDateCategory: {}, // Původní pro skládaný status graf (Today, Yesterday...)
-      deliveryTypeByDateCategory: {}, // Původní pro skládaný typ dodávky graf (Today, Yesterday...)
-      statusByLoadingDate: {}, // Nové pro skládaný status graf s Loading Date na X-ose
+      statusByDateCategory: {},
+      deliveryTypeByDateCategory: {},
+      statusByLoadingDate: {},
+      delayedOrdersList: [],
+      allAvailableDates: new Set(),
     };
 
-    // Inicializace hodinových snapshotů pro dnešek (00:00 do 23:00)
-    // Zde rozšířeno na celý den pro robustnost, i když graf může zobrazovat jen část
     for (let h = 0; h <= 23; h++) {
-      const hourKey = format(new Date(today.getFullYear(), today.getMonth(), today.getDate(), h), 'HH'); // Použijeme jen hodinu jako klíč
+      const hourKey = format(new Date(today.getFullYear(), today.getMonth(), today.getDate(), h), 'HH');
       result.hourlyStatusSnapshots[hourKey] = {
         '10': 0, '31': 0, '35': 0, '40': 0, '50': 0, '60': 0, '70': 0,
       };
     }
+
+    const dailySummariesMap = new Map();
 
     const doneStatuses = [50, 60, 70];
     const remainingStatuses = [10, 31, 35, 40];
@@ -664,102 +1477,93 @@ export default function ZakazkyDashboard() {
     const newOrderStatuses = [10];
     const sentStatuses = [60, 70];
 
-    // Inicializace byDay pro pevné offsety
-    for (let offset of dayOffsets) {
-      const day = format(
-        new Date(today.getFullYear(), today.getMonth(), today.getDate() + offset),
-        "yyyy-MM-dd"
-      );
-      result.byDay[day] = {
-        total: 0, done: 0, remaining: 0, inProgress: 0, newOrders: 0, pallets: 0, cartons: 0,
-      };
-    }
-
-    const todayDateStr = format(today, 'yyyy-MM-dd');
-    const yesterdayDateStr = format(subDays(today, 1), 'yyyy-MM-dd');
-
-    rows.forEach((row) => {
+    rawData.forEach((row) => {
       const loadingDate = row["Loading Date"];
       const status = Number(row["Status"]);
       const delType = row["del.type"];
-      // Používáme "Delivery" nebo "Delivery No" s trim() pro konzistenci
-      const deliveryIdentifier = (row["Delivery"] || row["Delivery No"])?.trim(); 
+      const deliveryIdentifier = (row["Delivery"] || row["Delivery No"])?.trim();
 
-      if (!loadingDate || isNaN(status) || !deliveryIdentifier) return; // Přidána kontrola deliveryIdentifier
+      if (!loadingDate || isNaN(status) || !deliveryIdentifier) return;
 
       const parsedDate = parseExcelDate(loadingDate);
 
       if (parsedDate === null || isNaN(parsedDate.getTime())) {
-        console.warn(`Invalid Loading Date for row: ${JSON.stringify(row)}`);
+        console.warn(`Invalid Loading Date for row (skipping): ${JSON.stringify(row)}`);
         return;
       }
 
       const formattedDate_YYYYMMDD = format(parsedDate, "yyyy-MM-dd");
       const formattedDate_DDMMYYYY = format(parsedDate, "dd/MM/yyyy");
 
-      // Určení kategorie data pro skládané grafy (Today, Yesterday, Older, Future)
+      result.allAvailableDates.add(formattedDate_YYYYMMDD);
+
+      // Aktualizace pro původní přehledové karty (celkové součty)
+      result.total += 1;
+      if (doneStatuses.includes(status)) result.doneTotal += 1;
+      if (remainingStatuses.includes(status)) result.remainingTotal += 1;
+      if (inProgressStatuses.includes(status)) result.inProgressTotal += 1;
+      if (newOrderStatuses.includes(status)) result.newOrdersTotal += 1;
+      if (delType === "P") result.palletsTotal += 1;
+      if (delType === "K") result.cartonsTotal += 1;
+
+
+      if (!dailySummariesMap.has(formattedDate_YYYYMMDD)) {
+        dailySummariesMap.set(formattedDate_YYYYMMDD, {
+          date: formattedDate_YYYYMMDD,
+          total: 0, done: 0, remaining: 0, inProgress: 0, newOrders: 0, pallets: 0, cartons: 0,
+        });
+      }
+      const currentDayStats = dailySummariesMap.get(formattedDate_YYYYMMDD);
+      currentDayStats.total += 1;
+      if (doneStatuses.includes(status)) currentDayStats.done += 1;
+      if (remainingStatuses.includes(status)) currentDayStats.remaining += 1;
+      if (inProgressStatuses.includes(status)) currentDayStats.inProgress += 1;
+      if (newOrderStatuses.includes(status)) currentDayStats.newOrders += 1;
+      if (delType === "P") currentDayStats.pallets += 1;
+      if (delType === "K") currentDayStats.cartons += 1;
+
       let dateCategoryName;
-      if (formattedDate_YYYYMMDD === todayDateStr) {
+      if (formattedDate_YYYYMMDD === format(today, 'yyyy-MM-dd')) {
         dateCategoryName = 'Today';
-      } else if (formattedDate_YYYYMMDD === yesterdayDateStr) {
+      } else if (formattedDate_YYYYMMDD === format(subDays(today, 1), 'yyyy-MM-dd')) {
         dateCategoryName = 'Yesterday';
       } else if (isBefore(parsedDate, today)) {
         dateCategoryName = 'Older';
-      } else if (isAfter(parsedDate, today)) { // Kontrola, zda je v budoucnosti
+      } else if (isAfter(parsedDate, today)) {
         dateCategoryName = 'Future';
       } else {
-        dateCategoryName = 'Other'; // Fallback pro jakýkoli jiný případ
+        dateCategoryName = 'Other';
       }
 
-      // Agregace pro statusByDateCategory (pro zachování původního grafu, pokud by byl potřeba)
       if (!result.statusByDateCategory[status]) {
         result.statusByDateCategory[status] = { 'Today': 0, 'Yesterday': 0, 'Older': 0, 'Future': 0 };
       }
       if (result.statusByDateCategory[status][dateCategoryName] !== undefined) {
-          result.statusByDateCategory[status][dateCategoryName]++;
+        result.statusByDateCategory[status][dateCategoryName]++;
       }
 
-      // Agregace pro deliveryTypeByDateCategory
       if (!result.deliveryTypeByDateCategory[delType]) {
         result.deliveryTypeByDateCategory[delType] = { 'Today': 0, 'Yesterday': 0, 'Older': 0, 'Future': 0 };
       }
       if (result.deliveryTypeByDateCategory[delType][dateCategoryName] !== undefined) {
-          result.deliveryTypeByDateCategory[delType][dateCategoryName]++;
+        result.deliveryTypeByDateCategory[delType][dateCategoryName]++;
       }
 
-      // NOVÁ agregace pro statusByLoadingDate (pro graf s Loading Date na X-ose)
       if (!result.statusByLoadingDate[formattedDate_YYYYMMDD]) {
         result.statusByLoadingDate[formattedDate_YYYYMMDD] = { date: formattedDate_DDMMYYYY };
       }
       result.statusByLoadingDate[formattedDate_YYYYMMDD][`status${status}`] =
         (result.statusByLoadingDate[formattedDate_YYYYMMDD][`status${status}`] || 0) + 1;
 
-
-      // Agregace pro byDay karty (pevné pro včera, dnes, zítra atd.)
-      if (result.byDay[formattedDate_YYYYMMDD]) {
-        result.byDay[formattedDate_YYYYMMDD].total += 1;
-        if (doneStatuses.includes(status)) result.byDay[formattedDate_YYYYMMDD].done += 1;
-        if (remainingStatuses.includes(status)) result.byDay[formattedDate_YYYYMMDD].remaining += 1;
-        if (inProgressStatuses.includes(status)) result.byDay[formattedDate_YYYYMMDD].inProgress += 1;
-        if (newOrderStatuses.includes(status)) result.byDay[formattedDate_YYYYMMDD].newOrders += 1;
-        if (delType === "P") result.byDay[formattedDate_YYYYMMDD].pallets += 1;
-        if (delType === "K") result.byDay[formattedDate_YYYYMMDD].cartons += 1;
-      }
-
-      // Celkové souhrnné počty (aplikují se na filtrovanou datovou sadu)
       if (doneStatuses.includes(status)) {
-        result.doneTotal += 1;
-
-        // Určení směny pro hotové objednávky pro graf porovnání směn
         const orderHour = getHours(parsedDate);
         const orderMinutes = parsedDate.getMinutes();
         const orderTimeInMinutes = orderHour * 60 + orderMinutes;
 
-        const shift1Start = 5 * 60 + 45; // 5:45 AM
-        const shift1End = 13 * 60 + 45; // 1:45 PM
-
-        const shift2Start = 13 * 60 + 45; // 1:45 PM
-        const shift2End = 21 * 60 + 45; // 9:45 PM
+        const shift1Start = 5 * 60 + 45;
+        const shift1End = 13 * 60 + 45;
+        const shift2Start = 13 * 60 + 45;
+        const shift2End = 21 * 60 + 45;
 
         if (orderTimeInMinutes >= shift1Start && orderTimeInMinutes < shift1End) {
           result.shiftDoneCounts['1'] += 1;
@@ -767,34 +1571,24 @@ export default function ZakazkyDashboard() {
           result.shiftDoneCounts['2'] += 1;
         }
       }
-      if (remainingStatuses.includes(status)) {
-        result.remainingTotal += 1;
-      }
-      if (inProgressStatuses.includes(status)) {
-        result.inProgress += 1;
-      }
-      if (newOrderStatuses.includes(status)) {
-        result.newOrders += 1;
-      }
 
       if (sentStatuses.includes(status)) {
         if (delType === "P") result.sentPallets += 1;
         if (delType === "K") result.sentCartons += 1;
       }
 
-      // Zpožděné zakázky
       if (isBefore(parsedDate, today) && !doneStatuses.includes(status)) {
         result.delayed += 1;
         const delayDays = differenceInDays(today, parsedDate);
         result.delayedOrdersList.push({
           delivery: deliveryIdentifier, status: status, delType: delType,
-          loadingDate: formattedDate_DDMMYYYY, delayDays: delayDays,
-          note: row["Note"] || "", // Zajištění, že poznámka je z raw dat
-          // Přidáme další potřebná pole pro zobrazení v modalu
+          loadingDate: parsedDate.toISOString(), // Store as ISO string
+          delayDays: delayDays,
+          note: row["Note"] || "",
           "Forwarding agent name": row["Forwarding agent name"],
           "Name of ship-to party": row["Name of ship-to party"],
           "Total Weight": row["Total Weight"],
-          "Bill of lading": row["Bill of lading"] || "", // Přidáno pole "Bill of lading"
+          "Bill of lading": row["Bill of lading"] || "",
         });
       }
 
@@ -805,24 +1599,22 @@ export default function ZakazkyDashboard() {
         result.deliveryTypes[delType] = (result.deliveryTypes[delType] || 0) + 1;
       }
 
-      // Hodinové status snapshoty pro *aktuální den zpracovaných dat*
-      // Používáme jen hodinu jako klíč (HH)
       if (format(parsedDate, 'yyyy-MM-dd') === format(today, 'yyyy-MM-dd')) {
         const hourKey = format(parsedDate, 'HH');
         if (result.hourlyStatusSnapshots[hourKey]) {
           if (result.hourlyStatusSnapshots[hourKey][status]) {
-              result.hourlyStatusSnapshots[hourKey][status] += 1;
+            result.hourlyStatusSnapshots[hourKey][status] += 1;
           } else {
-              result.hourlyStatusSnapshots[hourKey][status] = 1;
+            result.hourlyStatusSnapshots[hourKey][status] = 1;
           }
         }
       }
     });
 
-    result.totalToday = result.byDay[format(today, "yyyy-MM-dd")]?.total || 0;
+    result.dailySummaries = Array.from(dailySummariesMap.values()).sort((a, b) => new Date(a.date) - new Date(b.date));
 
     return result;
-  }, []); // parseExcelDate a getCurrentShift jsou nyní externí, takže zde nejsou potřeba
+  }, []);
 
   // Funkce pro aplikaci všech filtrů a následné zpracování dat
   const applyFiltersAndProcessData = useCallback((dataToFilter) => {
@@ -830,27 +1622,24 @@ export default function ZakazkyDashboard() {
     const now = new Date();
     const today = startOfDay(now);
 
-    // 1. Aplikace filtru časového rozsahu
     let tempStartDate = null;
     let tempEndDate = null;
 
     if (filterTimeRange === 'yesterday') {
       tempStartDate = subDays(today, 1);
-      tempEndDate = today; // Až do začátku dneška
+      tempEndDate = addDays(startOfDay(today), 0);
     } else if (filterTimeRange === 'today') {
       tempStartDate = today;
-      tempEndDate = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 1); // Až do začátku zítřka
+      tempEndDate = addDays(startOfDay(today), 1);
     } else if (filterTimeRange === 'last7days') {
-      tempStartDate = subDays(today, 6); // Zahrnuje dnešek
-      tempEndDate = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 1);
+      tempStartDate = subDays(today, 6);
+      tempEndDate = addDays(startOfDay(today), 1);
     } else if (filterTimeRange === 'thisMonth') {
       tempStartDate = startOfMonth(today);
-      tempEndDate = endOfMonth(today);
-      tempEndDate.setDate(tempEndDate.getDate() + 1); // Zahrnout konec měsíce
+      tempEndDate = addDays(endOfMonth(today), 1);
     } else if (filterTimeRange === 'custom' && filterStartDate && filterEndDate) {
       tempStartDate = startOfDay(new Date(filterStartDate));
-      tempEndDate = startOfDay(new Date(filterEndDate));
-      tempEndDate.setDate(tempEndDate.getDate() + 1); // Zahrnout konečný den
+      tempEndDate = addDays(startOfDay(new Date(filterEndDate)), 1);
     }
 
     if (filterTimeRange !== 'all') {
@@ -861,12 +1650,10 @@ export default function ZakazkyDashboard() {
       });
     }
 
-    // 2. Aplikace filtru typu dodávky
     if (filterDeliveryType !== 'all') {
       currentFilteredRows = currentFilteredRows.filter(row => row["del.type"] === filterDeliveryType);
     }
 
-    // 3. Aplikace filtru statusu
     if (filterStatus !== 'all') {
       currentFilteredRows = currentFilteredRows.filter(row => Number(row["Status"]) === Number(filterStatus));
     }
@@ -874,97 +1661,261 @@ export default function ZakazkyDashboard() {
     return processData(currentFilteredRows);
   }, [filterTimeRange, filterStartDate, filterEndDate, filterDeliveryType, filterStatus, processData]);
 
-  // Efekt pro opětovné aplikování filtrů, když se změní stav filtrů nebo rawExcelData
+  // Efekt pro opětovné aplikování filtrů, když se změní stav filtrů nebo allOrdersData
   useEffect(() => {
-    // Only process data if scripts are loaded and rawExcelData exists
-    if (isScriptsLoaded && rawExcelData.length > 0) {
-      setSummary(applyFiltersAndProcessData(rawExcelData));
-    } else if (rawExcelData.length === 0 && summary !== null) { // Pouze vyčistí, pokud summary není již null
+    if (isAuthenticated && allOrdersData.length > 0) {
+      const processed = applyFiltersAndProcessData(allOrdersData);
+      setSummary(processed);
+
+      const ordersOverTimeMap = new Map();
+      processed.dailySummaries.forEach(day => {
+        ordersOverTimeMap.set(day.date, {
+          date: day.date,
+          total: day.total,
+          remaining: day.remaining,
+          new: day.newOrders,
+          inProgress: day.inProgress,
+          completed: day.done,
+        });
+      });
+      setOrdersOverTimeData(Array.from(ordersOverTimeMap.values()).sort((a, b) => new Date(a.date) - new Date(b.date)));
+
+      const shiftComparisonData = processed.shiftDoneCounts ? [
+        { name: t.shift1Name, value: processed.shiftDoneCounts['1'] || 0 },
+        { name: t.shift2Name, value: processed.shiftDoneCounts['2'] || 0 },
+      ] : [];
+      setShiftComparisonData(shiftComparisonData);
+
+      const inProgressOnlyChartData = processed.hourlyStatusSnapshots ? Object.entries(processed.hourlyStatusSnapshots)
+        .filter(([, statuses]) => (statuses['31'] || 0) + (statuses['35'] || 0) + (statuses['40'] || 0) > 0)
+        .sort(([hourA], [hourB]) => parseInt(hourA) - parseInt(hourB))
+        .map(([hour, statuses]) => ({
+          hour: `${hour}:00`,
+          status31: statuses['31'] || 0,
+          status35: statuses['35'] || 0,
+          status40: statuses['40'] || 0,
+        })) : [];
+      setInProgressOnlyData(inProgressOnlyChartData);
+
+      const shipmentsChartData = processed.hourlyStatusSnapshots ? Object.entries(processed.hourlyStatusSnapshots)
+        .filter(([, statuses]) => (statuses['50'] || 0) + (statuses['60'] || 0) + (statuses['70'] || 0) > 0)
+        .sort(([hourA], [hourB]) => parseInt(hourA) - parseInt(hourB))
+        .map(([hour, statuses]) => ({
+          hour: `${hour}:00`,
+          status50: statuses['50'] || 0,
+          status60: statuses['60'] || 0,
+          status70: statuses['70'] || 0,
+        })) : [];
+      setShipmentsData(shipmentsChartData);
+
+      const deliveryTypePieData = Object.entries(processed.deliveryTypes || {}).map(([type, count]) => ({
+        name: type === "P" ? t.pallets : t.carton,
+        value: count,
+      })).filter(item => item.value > 0);
+      setDeliveryTypePieData(deliveryTypePieData);
+
+      const deliveryTypeStackedChartData = Object.keys(processed.deliveryTypeByDateCategory || {})
+        .map(type => ({
+          name: type === 'P' ? t.pallets : t.carton,
+          ...processed.deliveryTypeByDateCategory[type],
+        }))
+        .filter(item => Object.values(item).some((val, key) => key !== 'name' && val > 0));
+      setDeliveryTypeStackedChartData(deliveryTypeStackedChartData);
+
+      const dates = processed.dailySummaries.map(d => d.date);
+      setAvailableDatesForSummary(dates);
+      if (dates.length > 0) {
+        setSelectedDailySummaryDate(dates[dates.length - 1]);
+      }
+
+    } else if (allOrdersData.length === 0 && summary !== null) {
       setSummary(null);
+      setOrdersOverTimeData([]);
+      setShiftComparisonData([]);
+      setInProgressOnlyData([]);
+      setShipmentsData([]);
+      setDeliveryTypePieData([]);
+      setDeliveryTypeStackedChartData([]);
+      setAvailableDatesForSummary([]);
+      setSelectedDailySummaryDate('');
     }
-  }, [rawExcelData, applyFiltersAndProcessData, isScriptsLoaded]); // Ponecháno isScriptsLoaded v závislostech
+  }, [allOrdersData, applyFiltersAndProcessData, isAuthenticated, t]);
 
-  // Načtení historie importů ze Supabase při mountu (po autentizaci a připravenosti supabaseClient)
+  // Načtení dat z Supabase po autentizaci a když je komponenta na klientovi
   useEffect(() => {
-    const fetchHistory = async () => {
-      if (isAuthenticated && supabaseClient) { // supabaseClient je nyní v závislostech
-        try {
-          const { data, error } = await supabaseClient
-            .from("imports")
-            .select("id, created_at, original_name, data, date_label")
-            .order("created_at", { ascending: false });
+    const fetchDataAndHistory = async () => {
+      if (!isAuthenticated) {
+        setIsLoadingData(false); // Stop loading if not authenticated
+        return;
+      }
+      setIsLoadingData(true);
+      try {
+        const { data: deliveriesData, error: deliveriesError } = await supabaseClient
+          .from("deliveries")
+          .select('*');
 
-          if (error) {
-            console.error("Error fetching import history:", error);
-          } else {
-            setImportHistory(data);
-            if (data.length > 0) {
-              // Nastavíme poslední import jako výchozí
-              setSelectedImportId(data[0].id);
-              // Načteme data pro tento import
-              const { data: fetchedImportData, error: fetchImportError } = await supabaseClient
-                .from("imports")
-                .select("data")
-                .eq("id", data[0].id)
-                .single();
-              if (fetchImportError) {
-                console.error("Error fetching data for latest import:", fetchImportError);
-                setRawExcelData([]);
-              } else {
-                setRawExcelData(fetchedImportData.data);
-              }
-            }
-          }
-        } catch (e) {
-          console.error("Caught error fetching import history:", e);
+        if (deliveriesError) {
+          console.error("Error fetching deliveries data:", deliveriesError.message || deliveriesError);
+          setAllOrdersData([]);
+        } else {
+          // Ensure Loading Date is ISO string when fetched from DB
+          const formattedData = deliveriesData.map(row => {
+            const parsedDate = row["Loading Date"] ? new Date(row["Loading Date"]) : null;
+            return {
+              ...row,
+              "Loading Date": parsedDate && !isNaN(parsedDate.getTime()) ? parsedDate.toISOString() : null,
+              "Delivery No": (row["Delivery No"] || row["Delivery"])?.trim()
+            };
+          });
+          setAllOrdersData(formattedData);
+          setSearchOrdersResult(formattedData);
         }
+
+        const { data: importHistoryData, error: importHistoryError } = await supabaseClient
+          .from("imports")
+          .select("id, created_at, original_name, data, date_label")
+          .order("created_at", { ascending: false });
+
+        if (importHistoryError) {
+          console.error("Error fetching import history:", importHistoryError.message || importHistoryError);
+        } else {
+          setImportHistory(importHistoryData);
+          if (importHistoryData.length > 0 && !selectedImportId) {
+            setSelectedImportId(importHistoryData[0].id);
+          }
+        }
+      } catch (e) {
+        console.error("Caught error fetching initial data:", e);
+      } finally {
+        setIsLoadingData(false);
       }
     };
-    // Spustí fetchHistory pouze pokud je supabaseClient inicializován
-    if (supabaseClient) {
-      fetchHistory();
-    }
-  }, [isAuthenticated, supabaseClient]); // Přidáno supabaseClient do závislostí
 
-  // Autentizace (zjednodušená pro "Admin")
-  const handleLogin = () => {
-    if (username === "Admin" && password === "Admin") {
-      setIsAuthenticated(true);
-      setLoginError("");
-    } else {
+    if (isClient && isAuthenticated) {
+      fetchDataAndHistory();
+    }
+  }, [isClient, isAuthenticated, selectedImportId]);
+
+  // Autentizace (Firebase Auth)
+  const handleLogin = async () => {
+    setLoginError("");
+    setRegisterMessage("");
+    if (!isFirebaseReady || !firebaseAuth) { // Check isFirebaseReady
+      console.error("Firebase Auth not initialized or ready.");
+      setLoginError("Firebase authentication service is not ready. Please wait a moment.");
+      return;
+    }
+    try {
+      await signInWithEmailAndPassword(firebaseAuth, username, password);
+      // onAuthStateChanged listener handles setting isAuthenticated and currentUser
+    } catch (error) {
+      console.error("Login error:", error.message);
       setLoginError(t.loginError);
     }
   };
 
-  // Odhlášení
-  const handleLogout = () => {
-    setIsAuthenticated(false);
-    setUsername("");
-    setPassword("");
-    setSummary(null);
-    setRawExcelData([]);
-    setImportHistory([]);
-    setSelectedImportId(null);
-    setSearchOrdersResult([]); // Clear search results on logout
-    setSelectedOrderDetails(null); // Clear selected order details on logout
+  const handleRegister = async () => {
+    setLoginError("");
+    setRegisterMessage("");
+    if (!isFirebaseReady || !firebaseAuth || !firestoreDb || !currentAppId) { // Check isFirebaseReady
+      console.error("Firebase services not initialized or ready.");
+      setRegisterMessage("Firebase services are not ready for registration. Please wait a moment.");
+      return;
+    }
+    try {
+      const userCredential = await createUserWithEmailAndPassword(firebaseAuth, username, password);
+      const user = userCredential.user;
+
+      // Save user profile to Firestore
+      await setDoc(doc(firestoreDb, `artifacts/${currentAppId}/public/data/user_profiles`, user.uid), {
+        email: user.email,
+        displayName: user.email.split('@')[0], // Default display name
+        function: '',
+        isAdmin: false, // Default to not admin
+        createdAt: new Date().toISOString(),
+      });
+
+      setRegisterMessage(t.registerSuccess);
+      setIsRegistering(false); // Switch back to login form
+      setUsername('');
+      setPassword('');
+    } catch (error) {
+      console.error("Registration error:", error.message);
+      setRegisterMessage(`${t.registerError} ${error.message}`);
+    }
   };
 
-  // Funkce pro logování změn statusů do delivery_status_log a aktualizaci deliveries
-  const logStatusChanges = async (newImportData, importId) => {
-    if (!supabaseClient) {
-      console.warn("Supabase client not initialized for status logging.");
+  // Google Sign-in
+  const handleGoogleSignIn = async () => {
+    setLoginError("");
+    setRegisterMessage("");
+    if (!isFirebaseReady || !firebaseAuth || !firestoreDb || !currentAppId) {
+      console.error("Firebase services not initialized or ready for Google Sign-in.");
+      setLoginError("Firebase services are not ready for Google Sign-in. Please wait a moment.");
       return;
     }
 
     try {
-      // Načtení aktuálních statusů ze Supabase pro porovnání
+      const provider = new GoogleAuthProvider();
+      const result = await signInWithPopup(firebaseAuth, provider);
+      const user = result.user;
+
+      // Check if user profile exists in Firestore, if not, create it
+      const userProfileRef = doc(firestoreDb, `artifacts/${currentAppId}/public/data/user_profiles`, user.uid);
+      const userProfileSnap = await getDoc(userProfileRef);
+
+      if (!userProfileSnap.exists()) {
+        await setDoc(userProfileRef, {
+          email: user.email,
+          displayName: user.displayName || user.email.split('@')[0], // Use Google display name or default
+          function: '',
+          isAdmin: false, // Default to not admin
+          createdAt: new Date().toISOString(),
+        });
+        console.log("New Google user profile created in Firestore.");
+      } else {
+        console.log("Existing Google user profile found in Firestore.");
+      }
+      // onAuthStateChanged listener will handle setting isAuthenticated and currentUser
+    } catch (error) {
+      console.error("Google Sign-in error:", error.message);
+      setLoginError(`Google Sign-in error: ${error.message}`);
+    }
+  };
+
+  // Odhlášení
+  const handleLogout = async () => {
+    if (!firebaseAuth) {
+      console.error("Firebase Auth not initialized for logout.");
+      return;
+    }
+    try {
+      await signOut(firebaseAuth);
+      // onAuthStateChanged listener handles setting isAuthenticated and currentUser
+      setUsername("");
+      setPassword("");
+      setSummary(null);
+      setAllOrdersData([]);
+      setImportHistory([]);
+      setSelectedImportId(null);
+      setSearchOrdersResult([]);
+      setSelectedOrderDetails(null);
+      setAllUsers([]); // Clear users on logout
+      setCurrentUserProfile(null); // Clear current user profile on logout
+    } catch (error) {
+      console.error("Logout error:", error.message);
+    }
+  };
+
+  // Funkce pro logování změn statusů do delivery_status_log a aktualizaci deliveries
+  const logStatusChanges = async (newImportData, importId) => {
+    try {
       const { data: currentDeliveries, error: fetchError } = await supabaseClient
         .from("deliveries")
         .select('"Delivery No", "Status"');
 
       if (fetchError) {
         console.error("Error fetching current deliveries for status log:", fetchError.message);
-        // Pokračujeme dál, i když se nepodařilo načíst aktuální dodávky
       }
       const currentDeliveriesMap = new Map(currentDeliveries?.map(d => [d["Delivery No"], d.Status]) || []);
 
@@ -972,31 +1923,35 @@ export default function ZakazkyDashboard() {
       const upsertPromises = [];
 
       for (const row of newImportData) {
-        // Používáme "Delivery" nebo "Delivery No" s trim() pro konzistenci
         const deliveryIdentifier = (row["Delivery"] || row["Delivery No"])?.trim();
         const newStatus = Number(row["Status"]);
         const loadingDate = parseExcelDate(row["Loading Date"]);
 
-        if (!deliveryIdentifier || isNaN(newStatus) || !loadingDate) {
-          console.warn(`Skipping row due to missing/invalid data: ${JSON.stringify(row)}`);
+        // Ensure loadingDate is valid before proceeding
+        if (!loadingDate || isNaN(loadingDate.getTime())) {
+          console.warn(`Skipping row due to invalid Loading Date: ${JSON.stringify(row)}`);
           continue;
         }
 
         const existingStatus = currentDeliveriesMap.get(deliveryIdentifier);
 
-        // Vložíme nebo aktualizujeme hlavní tabulku 'deliveries'
+        if (!deliveryIdentifier || isNaN(newStatus)) {
+          console.warn(`Skipping row due to missing/invalid data: ${JSON.stringify(row)}`);
+          continue;
+        }
+
         upsertPromises.push(
           supabaseClient.from("deliveries").upsert(
             {
-              "Delivery No": deliveryIdentifier, // Mapujeme na "Delivery No" v DB
+              "Delivery No": deliveryIdentifier,
               "Status": newStatus,
               "del.type": row["del.type"],
-              "Loading Date": loadingDate.toISOString(),
+              "Loading Date": loadingDate.toISOString(), // Ensure ISO string is saved
               "Forwarding agent name": row["Forwarding agent name"],
               "Name of ship-to party": row["Name of ship-to party"],
               "Total Weight": row["Total Weight"],
-              "Note": row["Note"] || null, // Uložíme i poznámku
-              "Bill of lading": row["Bill of lading"] || null, // Uložíme i "Bill of lading"
+              "Note": row["Note"] || null,
+              "Bill of lading": row["Bill of lading"] || null,
               last_imported_at: new Date().toISOString(),
               source_import_id: importId,
             },
@@ -1004,19 +1959,16 @@ export default function ZakazkyDashboard() {
           )
         );
 
-        // Logování změny statusu
         if (existingStatus === undefined) {
-          // Nová dodávka, logujeme počáteční status
           statusLogEntries.push({
-            delivery_no: deliveryIdentifier, // Mapujeme na delivery_no v logu
+            delivery_no: deliveryIdentifier,
             status: newStatus,
             timestamp: new Date().toISOString(),
             source_import: importId,
           });
         } else if (existingStatus !== newStatus) {
-          // Status se změnil, logujeme nový status
           statusLogEntries.push({
-            delivery_no: deliveryIdentifier, // Mapujeme na delivery_no v logu
+            delivery_no: deliveryIdentifier,
             status: newStatus,
             timestamp: new Date().toISOString(),
             source_import: importId,
@@ -1024,10 +1976,8 @@ export default function ZakazkyDashboard() {
         }
       }
 
-      // Spustíme všechny upsert operace pro tabulku 'deliveries'
       await Promise.all(upsertPromises);
 
-      // Vložíme nové záznamy do delivery_status_log
       if (statusLogEntries.length > 0) {
         const { error: logError } = await supabaseClient.from("delivery_status_log").insert(statusLogEntries);
         if (logError) {
@@ -1041,7 +1991,6 @@ export default function ZakazkyDashboard() {
       console.error("Caught error during status logging:", e);
     }
   };
-
 
   // Handler pro nahrání souboru
   const handleFileUpload = async (e) => {
@@ -1061,40 +2010,49 @@ export default function ZakazkyDashboard() {
       const worksheet = workbook.Sheets[sheetName];
       const jsonData = window.XLSX.utils.sheet_to_json(worksheet);
 
-      // Před uložením do Supabase a zpracováním dat, uložíme rawExcelData
-      setRawExcelData(jsonData);
+      try {
+        const { data: savedImport, error: importError } = await supabaseClient.from("imports").insert([
+          {
+            created_at: new Date().toISOString(),
+            original_name: file.name,
+            data: jsonData,
+            date_label: format(new Date(), "dd/MM/yyyy HH:mm"),
+          },
+        ]).select('id, created_at, original_name, date_label');
 
-      if (supabaseClient) {
-        try {
-          // Uložíme metadata importu a samotná data do tabulky 'imports'
-          const { data: savedImport, error: importError } = await supabaseClient.from("imports").insert([
-            {
-              created_at: new Date().toISOString(),
-              original_name: file.name,
-              data: jsonData, // Uložíme celá JSON data
-              date_label: format(new Date(), "dd/MM/yyyy HH:mm"),
-            },
-          ]).select('id, created_at, original_name, date_label');
-
-          if (importError) {
-            console.error("Error saving import metadata and data to Supabase:", importError);
-            return;
-          }
-
-          const newImportId = savedImport[0].id;
-
-          // Nyní logujeme statusy a aktualizujeme hlavní tabulku dodávek
-          await logStatusChanges(jsonData, newImportId);
-
-          // Aktualizujeme historii importů v UI
-          setImportHistory(prevHistory => [savedImport[0], ...prevHistory]);
-          setSelectedImportId(newImportId); // Nastavíme nově nahraný import jako vybraný
-
-        } catch (e) {
-          console.error("Caught error during file upload and saving to Supabase:", e);
+        if (importError) {
+          console.error("Error saving import metadata and data to Supabase:", importError.message || importError);
+          return;
         }
-      } else {
-        console.warn("Supabase client not initialized. Data will not be saved to DB.");
+
+        const newImportId = savedImport[0].id;
+
+        await logStatusChanges(jsonData, newImportId);
+
+        const { data: deliveriesData, error: deliveriesError } = await supabaseClient
+          .from("deliveries")
+          .select('*');
+
+        if (deliveriesError) {
+          console.error("Error re-fetching deliveries data after upload:", deliveriesError.message || deliveriesError);
+        } else {
+          const formattedData = deliveriesData.map(row => {
+            const parsedDate = row["Loading Date"] ? new Date(row["Loading Date"]) : null;
+            return {
+              ...row,
+              "Loading Date": parsedDate && !isNaN(parsedDate.getTime()) ? parsedDate.toISOString() : null,
+              "Delivery No": (row["Delivery No"] || row["Delivery"])?.trim()
+            };
+          });
+          setAllOrdersData(formattedData);
+          setSearchOrdersResult(formattedData);
+        }
+
+        setImportHistory(prevHistory => [savedImport[0], ...prevHistory]);
+        setSelectedImportId(newImportId);
+
+      } catch (e) {
+        console.error("Caught error during file upload and saving to Supabase:", e);
       }
     };
 
@@ -1105,31 +2063,54 @@ export default function ZakazkyDashboard() {
   const handleSelectImport = async (e) => {
     const id = e.target.value;
     setSelectedImportId(id);
-    if (id && supabaseClient) {
+    if (id) {
       try {
-        // Načteme data z tabulky 'imports'
         const { data: fetchedImport, error } = await supabaseClient
           .from("imports")
           .select("data")
           .eq("id", id)
-          .single(); // Použijeme single, protože očekáváme jeden záznam
+          .single();
 
         if (error) {
-          console.error("Error fetching selected import data:", error);
-          setSummary(null);
-          setRawExcelData([]);
+          console.error("Error fetching selected import data:", error.message || error);
+          setAllOrdersData([]);
         } else {
-          // Supabase uloží data jako JSONB, která se načtou jako JS objekt/pole
-          setRawExcelData(fetchedImport.data);
+          // Ensure data from import history is also formatted to ISO string
+          const formattedData = fetchedImport.data.map(row => {
+            const parsedDate = parseExcelDate(row["Loading Date"]);
+            return {
+              ...row,
+              "Loading Date": parsedDate && !isNaN(parsedDate.getTime()) ? parsedDate.toISOString() : null, // Re-parse and ISO string
+              "Delivery No": (row["Delivery No"] || row["Delivery"])?.trim()
+            };
+          });
+          setAllOrdersData(formattedData);
+          setSearchOrdersResult(formattedData);
         }
       } catch (e) {
         console.error("Caught error fetching selected import data:", e);
-        setSummary(null);
-        setRawExcelData([]);
+        setAllOrdersData([]);
       }
     } else {
-      setSummary(null);
-      setRawExcelData([]);
+      const { data: deliveriesData, error: deliveriesError } = await supabaseClient
+        .from("deliveries")
+        .select('*');
+
+      if (deliveriesError) {
+        console.error("Error fetching all deliveries data:", deliveriesError.message || deliveriesError);
+        setAllOrdersData([]);
+      } else {
+        const formattedData = deliveriesData.map(row => {
+          const parsedDate = row["Loading Date"] ? new Date(row["Loading Date"]) : null;
+          return {
+            ...row,
+            "Loading Date": parsedDate && !isNaN(parsedDate.getTime()) ? parsedDate.toISOString() : null,
+            "Delivery No": (row["Delivery No"] || row["Delivery"])?.trim()
+          };
+        });
+        setAllOrdersData(formattedData);
+        setSearchOrdersResult(formattedData);
+      }
     }
   };
 
@@ -1141,38 +2122,30 @@ export default function ZakazkyDashboard() {
 
   // Smazání importu
   const handleDeleteImport = async () => {
-    if (!itemToDeleteId || !supabaseClient) return;
+    if (!itemToDeleteId) return;
 
     try {
-      // Smažeme záznamy z delivery_status_log, které odkazují na tento import
       const { error: logDeleteError } = await supabaseClient
         .from("delivery_status_log")
         .delete()
         .eq("source_import", itemToDeleteId);
 
       if (logDeleteError) {
-        console.error("Error deleting associated status logs:", logDeleteError);
-        // Můžeme se rozhodnout, zda pokračovat, nebo zastavit
+        console.error("Error deleting associated status logs:", logDeleteError.message);
       }
 
-      // Smažeme záznamy z hlavní tabulky 'deliveries', které byly naposledy aktualizovány tímto importem
-      // Toto je složitější, protože dodávka mohla být aktualizována i jiným importem.
-      // Pro jednoduchost smažeme jen import metadata. Pokud chcete smazat i dodávky,
-      // museli byste implementovat složitější logiku, aby se smazaly jen ty dodávky,
-      // které byly POUZE v tomto importu, nebo ty, které by po smazání neměly žádný platný status.
-      // Pro účely tohoto příkladu smažeme jen záznam o importu a logy.
       const { error: importDeleteError } = await supabaseClient
         .from("imports")
         .delete()
         .eq("id", itemToDeleteId);
 
       if (importDeleteError) {
-        console.error("Error deleting import:", importDeleteError);
+        console.error("Error deleting import:", importDeleteError.message);
       } else {
         setImportHistory(prevHistory => prevHistory.filter(item => item.id !== itemToDeleteId));
         if (selectedImportId === itemToDeleteId) {
           setSummary(null);
-          setRawExcelData([]);
+          setAllOrdersData([]);
           setSelectedImportId(null);
         }
       }
@@ -1216,6 +2189,113 @@ export default function ZakazkyDashboard() {
     });
   };
 
+  // Export do XLSX pro výsledky vyhledávání
+  const exportSearchResultsToXLSX = () => {
+    if (typeof window.XLSX === 'undefined') {
+      console.error("XLSX library not loaded for export.");
+      return;
+    }
+    if (searchOrdersResult.length === 0) {
+      // Using alert for simplicity, consider a custom modal
+      // Do not use alert() in production.
+      // This is a placeholder for a custom modal message.
+      console.log("No data to export.");
+      return;
+    }
+
+    const ws = window.XLSX.utils.json_to_sheet(searchOrdersResult.map(order => ({
+      [t.deliveryNo]: order["Delivery No"],
+      [t.status]: order.Status,
+      [t.deliveryType]: order["del.type"],
+      [t.loadingDate]: order["Loading Date"] ? format(parseISO(order["Loading Date"]), 'dd/MM/yyyy') : 'N/A',
+      [t.forwardingAgent]: order["Forwarding agent name"],
+      [t.shipToPartyName]: order["Name of ship-to party"],
+      [t.totalWeight]: order["Total Weight"],
+      [t.billOfLading]: order["Bill of lading"],
+      [t.note]: order.Note,
+    })));
+    const wb = window.XLSX.utils.book_new();
+    window.XLSX.utils.book_append_sheet(wb, ws, "Search Results");
+    window.XLSX.writeFile(wb, `Search_Results_${format(new Date(), 'yyyyMMdd_HHmmss')}.xlsx`);
+  };
+
+  // Export zpožděných zakázek do XLSX
+  const exportDelayedOrdersXLSX = async () => {
+    if (typeof window.XLSX === 'undefined') {
+      console.error("XLSX library not loaded for export.");
+      return;
+    }
+
+    try {
+      const today = startOfDay(new Date());
+      const { data, error } = await supabaseClient
+        .from('deliveries')
+        .select('"Delivery No", "Status", "del.type", "Loading Date", "Note", "Forwarding agent name", "Name of ship-to party", "Total Weight", "Bill of lading"')
+        .lt('"Loading Date"', today.toISOString())
+        .not('Status', 'in', '(50,60,70)');
+
+      if (error) {
+        console.error('Error fetching delayed deliveries for XLSX export:', error.message);
+        return;
+      }
+
+      const formattedData = data.map(item => {
+        let parsedDate = null;
+        if (item["Loading Date"]) {
+          try {
+            parsedDate = parseISO(item["Loading Date"]);
+            if (isNaN(parsedDate.getTime())) {
+              parsedDate = null; // Ensure it's null if invalid
+            }
+          } catch (e) {
+            console.error("Error parsing date for export:", item["Loading Date"], e);
+            parsedDate = null;
+          }
+        }
+
+        const delayDays = (parsedDate && isBefore(parsedDate, today) && ![50, 60, 70].includes(Number(item.Status)))
+          ? differenceInDays(today, parsedDate)
+          : 0;
+
+        return {
+          [t.deliveryNo]: item["Delivery No"],
+          [t.status]: item.Status,
+          [t.deliveryType]: item["del.type"],
+          [t.loadingDate]: parsedDate ? format(parsedDate, 'dd.MM.yyyy') : 'N/A',
+          [t.delay]: delayDays,
+          [t.note]: item.Note || '',
+          [t.forwardingAgent]: item["Forwarding agent name"] || 'N/A',
+          [t.shipToPartyName]: item["Name of ship-to party"] || 'N/A',
+          [t.totalWeight]: item["Total Weight"] || 'N/A',
+          [t.billOfLading]: item["Bill of lading"] || 'N/A',
+        };
+      });
+
+      if (formattedData.length === 0) {
+        console.log("No data to export.");
+        return;
+      }
+
+      const ws = window.XLSX.utils.json_to_sheet(formattedData);
+      const wb = window.XLSX.utils.book_new();
+      window.XLSX.utils.book_append_sheet(wb, ws, "Delayed Orders");
+      window.XLSX.writeFile(wb, `${t.delayed}_${format(new Date(), 'yyyyMMdd_HHmmss')}.xlsx`);
+
+    } catch (e) {
+      console.error("Caught error during XLSX export:", e);
+    }
+  };
+
+  // Compare Imports (Placeholder for now, no actual comparison logic implemented)
+  const handleCompareImports = () => {
+    setComparisonResults({
+      // Example results, replace with actual comparison logic
+      '10_to_31': 5,
+      'new_order_10': 2,
+      'removed_order_40': 1,
+      'noChangesDetected': 0, // This should be calculated
+    });
+  };
 
   // Funkce pro získání barvy zpoždění
   const getDelayColorClass = (delayDays) => {
@@ -1224,12 +2304,13 @@ export default function ZakazkyDashboard() {
     return "text-red-400";
   };
 
-  // Pomocná funkce pro formátování data na والصلاه-MM-DD
-  function formatDate(dateInput) {
+  // Pomocná funkce pro formátování data naYYYY-MM-DD
+  function formatDateToYYYYMMDD(dateInput) {
     if (!dateInput) return "";
     try {
-      const date = typeof dateInput === "string" ? new Date(dateInput) : new Date(dateInput);
-      return date.toISOString().split("T")[0];
+      const date = typeof dateInput === "string" ? parseISO(dateInput) : new Date(dateInput);
+      if (isNaN(date.getTime())) return ""; // Handle invalid date objects
+      return format(date, "yyyy-MM-dd");
     } catch {
       return "";
     }
@@ -1237,10 +2318,6 @@ export default function ZakazkyDashboard() {
 
   // Funkce pro uložení poznámky do Supabase
   const handleSaveNote = useCallback(async (deliveryNo, newNote) => {
-    if (!supabaseClient) {
-      console.error("Supabase client not initialized for saving note.");
-      return;
-    }
     try {
       const { error } = await supabaseClient
         .from('deliveries')
@@ -1251,30 +2328,48 @@ export default function ZakazkyDashboard() {
         console.error("Error saving note:", error.message);
       } else {
         console.log(`Note for delivery ${deliveryNo} saved successfully.`);
-        // Optionally, re-fetch data or update local state to reflect the change
-        // For simplicity, we'll just log success.
+        // Update allOrdersData to reflect the change
+        setAllOrdersData(prevData =>
+          prevData.map(order =>
+            (order["Delivery No"] || order["Delivery"])?.trim() === deliveryNo
+              ? { ...order, Note: newNote }
+              : order
+          )
+        );
+        // Update selectedOrderDetails if it's the current one
+        setSelectedOrderDetails(prevDetails =>
+          prevDetails && prevDetails["Delivery No"] === deliveryNo
+            ? { ...prevDetails, Note: newNote }
+            : prevDetails
+        );
       }
     } catch (e) {
       console.error("Caught error during saving note:", e);
     }
-  }, [supabaseClient]);
+  }, []);
 
-
-  // Funkce pro vyhledávání dodávky a načtení historie statusů (původní Search, nyní pro Order Search tab)
+  // Funkce pro vyhledávání dodávky a načtení historie statusů
   const handleSearchOrders = useCallback(() => {
-    // Přidána ochrana proti chybě TypeError: null is not iterable
-    if (!Array.isArray(rawExcelData) || rawExcelData === null) {
+    if (!Array.isArray(allOrdersData) || allOrdersData === null) {
       setSearchOrdersResult([]);
       return;
     }
 
-    const filtered = rawExcelData.filter((row) => {
-      const deliveryMatch = searchDeliveryNo
-        ? (row["Delivery"] || row["Delivery No"] || "").toLowerCase().includes(searchDeliveryNo.toLowerCase().trim())
+    // Handle bulk search for Delivery No.
+    const searchDeliveryNos = searchDeliveryNo
+      .split(/[, \n]+/) // Split by comma, space, or newline
+      .map(s => s.trim())
+      .filter(s => s !== '');
+
+    const filtered = allOrdersData.filter((row) => {
+      const deliveryIdentifier = (row["Delivery"] || row["Delivery No"] || "").trim();
+
+      const deliveryMatch = searchDeliveryNos.length > 0
+        ? searchDeliveryNos.some(num => deliveryIdentifier.toLowerCase().includes(num.toLowerCase()))
         : true;
 
       const loadingDateMatch = searchLoadingDate
-        ? formatDate(row["Loading Date"]) === searchLoadingDate
+        ? formatDateToYYYYMMDD(row["Loading Date"]) === searchLoadingDate
         : true;
 
       const statusMatch = searchStatus !== "all"
@@ -1288,23 +2383,21 @@ export default function ZakazkyDashboard() {
       return deliveryMatch && loadingDateMatch && statusMatch && partyMatch;
     });
 
-    // Map filtered results to the format expected by OrderListTable and OrderDetailsModal
     const mappedResults = filtered.map(order => ({
       "Delivery No": (order["Delivery"] || order["Delivery No"])?.trim(),
       "Status": Number(order.Status),
       "del.type": order["del.type"],
-      "Loading Date": order["Loading Date"],
+      "Loading Date": order["Loading Date"], // Keep as ISO string
       "Note": order["Note"] || "",
       "Forwarding agent name": order["Forwarding agent name"] || "N/A",
       "Name of ship-to party": order["Name of ship-to party"] || "N/A",
-      "Total Weight": order["Total Weight"] || "N/A",
-      "Bill of lading": order["Bill of lading"] || "N/A", // Přidáno "Bill of lading"
-      "processingTime": "N/A", // Since we are not fetching from DB here, set to N/A
+      "Total Weight": order["Total Weight"],
+      "Bill of lading": order["Bill of lading"] || "N/A",
+      "processingTime": "N/A",
     }));
 
     setSearchOrdersResult(mappedResults);
-  }, [rawExcelData, searchDeliveryNo, searchLoadingDate, searchStatus, searchShipToPartyName]);
-
+  }, [allOrdersData, searchDeliveryNo, searchLoadingDate, searchStatus, searchShipToPartyName]);
 
   // Pie chart aktivní tvar pro hover efekt
   const renderActiveShape = (props) => {
@@ -1315,7 +2408,7 @@ export default function ZakazkyDashboard() {
     const sx = cx + (outerRadius + 10) * cos;
     const sy = cy + (outerRadius + 10) * sin;
     const mx = cx + (outerRadius + 30) * cos;
-    const my = cy + (outerRadius + 30) * sin;
+    const my = cy;
     const ex = mx + (cos >= 0 ? 1 : -1) * 22;
     const ey = my;
     const textAnchor = cos >= 0 ? 'start' : 'end';
@@ -1351,63 +2444,13 @@ export default function ZakazkyDashboard() {
     );
   };
 
-  const [activeIndexStatus, setActiveIndexStatus] = useState(0);
   const onPieEnterStatus = useCallback((_, index) => {
     setActiveIndexStatus(index);
   }, []);
 
-  const [activeIndexDelivery, setActiveIndexDelivery] = useState(0);
   const onPieEnterDelivery = useCallback((_, index) => {
     setActiveIndexDelivery(index);
   }, []);
-
-  // Příprava dat pro Candlestick Chart (Hourly Overview)
-  // Filtrujeme jen hodiny, které mají nějaká data
-  const candlestickChartData = summary?.hourlyStatusSnapshots ? Object.entries(summary.hourlyStatusSnapshots)
-    .filter(([, statuses]) => Object.values(statuses).some(count => count > 0)) // Filtrujeme prázdné hodiny
-    .sort(([hourA], [hourB]) => parseInt(hourA) - parseInt(hourB))
-    .map(([hour, statuses]) => ({
-      hour: `${hour}:00`, // Formátujeme hodinu pro zobrazení
-      status10: statuses['10'] || 0,
-      status31: statuses['31'] || 0,
-      status35: statuses['35'] || 0,
-      status40: statuses['40'] || 0,
-      status50: statuses['50'] || 0,
-      status60: statuses['60'] || 0,
-      status70: statuses['70'] || 0,
-    })) : [];
-
-  // Příprava dat pro In Progress Only Chart
-  const inProgressOnlyChartData = summary?.hourlyStatusSnapshots ? Object.entries(summary.hourlyStatusSnapshots)
-    .filter(([, statuses]) => (statuses['31'] || 0) + (statuses['35'] || 0) + (statuses['40'] || 0) > 0) // Filtrujeme prázdné hodiny
-    .sort(([hourA], [hourB]) => parseInt(hourA) - parseInt(hourB))
-    .map(([hour, statuses]) => ({
-      hour: `${hour}:00`,
-      status31: statuses['31'] || 0,
-      status35: statuses['35'] || 0,
-      status40: statuses['40'] || 0,
-    })) : [];
-
-  // Příprava dat pro Shipments Chart (statuses 50, 60, 70)
-  const shipmentsChartData = summary?.hourlyStatusSnapshots ? Object.entries(summary.hourlyStatusSnapshots)
-    .filter(([, statuses]) => (statuses['50'] || 0) + (statuses['60'] || 0) + (statuses['70'] || 0) > 0) // Filtrujeme prázdné hodiny
-    .sort(([hourA], [hourB]) => parseInt(hourA) - parseInt(hourB))
-    .map(([hour, statuses]) => ({
-      hour: `${hour}:00`,
-      status50: statuses['50'] || 0,
-      status60: statuses['60'] || 0,
-      status70: statuses['70'] || 0,
-    })) : [];
-
-  // Data pro "Orders Over Time" chart
-  const ordersOverTimeData = Object.entries(summary?.byDay || {}).map(([date, stats]) => ({
-    date: format(new Date(date), 'dd/MM/yyyy'),
-    celkem: stats.total,
-    hotovo: stats.done,
-    "v procesu": stats.inProgress,
-    zbývá: stats.remaining,
-    nové: stats.newOrders,
-  }));
 
   // Data pro "Status Distribution" Pie Chart
   const statusPieData = Object.entries(summary?.statusCounts || {}).map(([status, count]) => ({
@@ -1415,62 +2458,29 @@ export default function ZakazkyDashboard() {
     value: count,
   })).filter(item => item.value > 0);
 
-  // Data pro "Order Types" Pie Chart
-  const deliveryTypePieData = Object.entries(summary?.deliveryTypes || {}).map(([type, count]) => ({
-    name: type === "P" ? t.pallets : t.carton,
-    value: count,
-  })).filter(item => item.value > 0);
-
-  // Data pro Shift Comparison Chart
-  const shiftComparisonData = summary?.shiftDoneCounts ? [
-    { name: t.shift1Name, value: summary.shiftDoneCounts['1'] || 0 },
-    { name: t.shift2Name, value: summary.shiftDoneCounts['2'] || 0 },
-  ] : [];
-
-  // Data pro Stacked Status Chart by Date Category (původní)
-  const statusStackedChartDataOld = Object.keys(summary?.statusByDateCategory || {})
-    .map(status => ({
-      name: `Status ${status}`,
-      ...summary.statusByDateCategory[status],
-    }))
-    .filter(item => Object.values(item).some((val, key) => key !== 'name' && val > 0));
-
   // NOVÁ data pro Stacked Status Chart by Loading Date
-  // Převedeme objekt statusByLoadingDate na pole pro Recharts
   const statusStackedChartData = Object.values(summary?.statusByLoadingDate || {})
     .sort((a, b) => {
-      // Parse "dd/MM/yyyy" to Date objects for comparison
       const dateA = new Date(a.date.split('/').reverse().join('-'));
       const dateB = new Date(b.date.split('/').reverse().join('-'));
       return dateA - dateB;
     });
 
-
-  // Data pro Stacked Delivery Type Chart by Date Category
-  const deliveryTypeStackedChartData = Object.keys(summary?.deliveryTypeByDateCategory || {})
-    .map(type => ({
-      name: type === 'P' ? t.pallets : t.carton,
-      ...summary.deliveryTypeByDateCategory[type],
-    }))
-    .filter(item => Object.values(item).some((val, key) => key !== 'name' && val > 0));
-
-
   // Získání unikátních statusů a typů dodávek pro dropdown filtry
-  const uniqueStatuses = Array.from(new Set(rawExcelData.map(row => Number(row["Status"])).filter(s => !isNaN(s)))).sort((a, b) => a - b);
-  const uniqueDeliveryTypes = Array.from(new Set(rawExcelData.map(row => row["del.type"]).filter(t => t))).sort();
+  const uniqueStatuses = Array.from(new Set(allOrdersData.map(row => Number(row["Status"])).filter(s => !isNaN(s)))).sort((a, b) => a - b);
+  const uniqueDeliveryTypes = Array.from(new Set(allOrdersData.map(row => row["del.type"]).filter(t => t))).sort();
 
   // Funkce pro načtení a zobrazení seznamu zakázek v modalu
   const handleCardClick = useCallback(async (category, statusFilterArray = [], deliveryTypeFilter = null, selectedDateString = null) => {
     setModalTitle(t.orderListFor + " " + t[category]);
 
-    let filteredOrders = rawExcelData;
+    let filteredOrders = allOrdersData;
 
-    // Apply date filter first if a specific date is provided
     if (selectedDateString) {
-        filteredOrders = filteredOrders.filter(order => {
-            const parsedOrderDate = parseExcelDate(order["Loading Date"]);
-            return parsedOrderDate && format(parsedOrderDate, 'yyyy-MM-dd') === selectedDateString;
-        });
+      filteredOrders = filteredOrders.filter(order => {
+        const parsedOrderDate = parseExcelDate(order["Loading Date"]);
+        return parsedOrderDate && format(parsedOrderDate, 'yyyy-MM-dd') === selectedDateString;
+      });
     }
 
     if (statusFilterArray.length > 0) {
@@ -1484,36 +2494,30 @@ export default function ZakazkyDashboard() {
     } else if (deliveryTypeFilter) {
       filteredOrders = filteredOrders.filter(order => order["del.type"] === deliveryTypeFilter);
     }
-    // Pro 'total' se neaplikuje žádný další filtr, použijí se všechna rawExcelData (již filtrovaná podle data, pokud je selectedDateString přítomen)
 
     const mappedOrders = filteredOrders.map(order => ({
       "Delivery No": (order["Delivery"] || order["Delivery No"])?.trim(),
       "Status": Number(order.Status),
       "del.type": order["del.type"],
-      "Loading Date": order["Loading Date"],
+      "Loading Date": order["Loading Date"], // Keep as ISO string
       "Note": order["Note"] || "",
       "Forwarding agent name": order["Forwarding agent name"] || "N/A",
       "Name of ship-to party": order["Name of ship-to party"] || "N/A",
-      "Total Weight": order["Total Weight"] || "N/A",
-      "Bill of lading": order["Bill of lading"] || "N/A", // Přidáno "Bill of lading"
+      "Total Weight": order["Total Weight"],
+      "Bill of lading": order["Bill of lading"] || "N/A",
     }));
 
     setModalOrders(mappedOrders);
     setShowOrderListModal(true);
-  }, [rawExcelData, t]); // parseExcelDate je externí, takže zde není potřeba
+  }, [allOrdersData, t]);
 
   // Funkce pro zobrazení historie statusů v modalu
   const handleShowStatusHistory = useCallback(async (deliveryIdentifier) => {
-    if (!supabaseClient) {
-      console.error("Supabase client not initialized for status history.");
-      return;
-    }
-    setCurrentDeliveryNo(deliveryIdentifier);
     try {
       const { data, error } = await supabaseClient
         .from('delivery_status_log')
         .select('status, timestamp')
-        .eq('delivery_no', deliveryIdentifier.trim()) // Trim for consistency
+        .eq('delivery_no', deliveryIdentifier.trim())
         .order('timestamp', { ascending: true });
 
       if (error) {
@@ -1528,278 +2532,37 @@ export default function ZakazkyDashboard() {
     } finally {
       setShowStatusHistoryModal(true);
     }
-  }, [supabaseClient]); // supabaseClient je závislost
+  }, []);
 
-  // Export zpožděných zakázek do CSV
-  const exportDelayedOrdersCSV = async () => {
-    if (!supabaseClient || typeof window.Blob === 'undefined') {
-      console.error("Supabase client or Blob API not available for CSV export.");
-      return;
-    }
-
-    try {
-      const today = startOfDay(new Date());
-      const { data, error } = await supabaseClient
-        .from('deliveries')
-        .select('"Delivery No", "Status", "del.type", "Loading Date", "Note", "Forwarding agent name", "Name of ship-to party", "Total Weight", "Bill of lading"') // Přidáno "Bill of lading"
-        .lt('"Loading Date"', today.toISOString())
-        .not('Status', 'in', '(50,60,70)'); // Zpožděné = Loading Date v minulosti A status není hotovo/odesláno
-
-      if (error) {
-        console.error('Error fetching delayed deliveries for CSV export:', error.message);
-        return;
-      }
-
-      const headers = [
-        t.deliveryNo,
-        t.status,
-        t.deliveryType,
-        t.loadingDate,
-        t.delay, // Add delay header for CSV
-        t.note,
-        t.forwardingAgent,
-        t.shipToPartyName,
-        t.totalWeight,
-        t.billOfLading, // Přidáno "Bill of lading" do hlaviček
-      ];
-
-      const csvRows = [];
-      csvRows.push(headers.join(',')); // Add headers to CSV
-
-      data.forEach(item => {
-        const parsedDate = parseISO(item["Loading Date"]); // Parse ISO string from DB
-        const delayDays = isBefore(parsedDate, today) && ![50, 60, 70].includes(Number(item.Status)) ? differenceInDays(today, parsedDate) : 0;
-
-        const row = [
-          `"${item["Delivery No"]}"`,
-          item.Status,
-          `"${item["del.type"]}"`,
-          `"${item["Loading Date"] ? format(parsedDate, 'dd.MM.yyyy') : ''}"`,
-          delayDays,
-          `"${(item.Note || '').replace(/"/g, '""')}"`, // Escape quotes in notes
-          `"${(item["Forwarding agent name"] || '').replace(/"/g, '""')}"`,
-          `"${(item["Name of ship-to party"] || '').replace(/"/g, '""')}"`,
-          `"${(item["Total Weight"] || '')}"`,
-          `"${(item["Bill of lading"] || '').replace(/"/g, '""')}"`, // Přidáno "Bill of lading" do řádku
-        ].join(',');
-        csvRows.push(row);
-      });
-
-      const csvString = csvRows.join('\n');
-      const blob = new Blob([csvString], { type: 'text/csv;charset=utf-8;' });
-      const link = document.createElement('a');
-      link.href = URL.createObjectURL(blob);
-      link.download = `${t.delayed}_${format(new Date(), 'yyyyMMdd_HHmmss')}.csv`;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      URL.revokeObjectURL(link.href); // Clean up the URL object
-    } catch (e) {
-      console.error("Caught error during CSV export:", e);
-    }
-  };
-
-
-  // Funkce pro porovnání dvou importů
-  const handleCompareImports = async () => {
-    if (!compareImport1Id || !compareImport2Id || !supabaseClient) {
-      setComparisonResults(null);
-      return;
-    }
-
-    try {
-      // Načteme data pro první import z tabulky imports
-      const { data: import1Raw, error: error1 } = await supabaseClient
-        .from('imports')
-        .select('data')
-        .eq('id', compareImport1Id)
-        .single();
-
-      // Načteme data pro druhý import z tabulky imports
-      const { data: import2Raw, error: error2 } = await supabaseClient
-        .from('imports')
-        .select('data')
-        .eq('id', compareImport2Id)
-        .single();
-
-      if (error1 || error2) {
-        console.error("Error fetching imports for comparison:", error1?.message || error2?.message);
-        setComparisonResults({});
-        return;
-      }
-
-      const import1Data = import1Raw.data;
-      const import2Data = import2Raw.data;
-
-      // Vytvoříme mapy pro snadné porovnání, s konzistentním klíčem (Delivery nebo Delivery No)
-      const map1 = new Map(import1Data.map(d => [(d["Delivery"] || d["Delivery No"])?.trim(), Number(d.Status)]));
-      const map2 = new Map(import2Data.map(d => [(d["Delivery"] || d["Delivery No"])?.trim(), Number(d.Status)]));
-
-      const results = {};
-      const allDeliveryNos = new Set([...map1.keys(), ...map2.keys()]); // Získáme všechna unikátní čísla dodávek z obou importů
-
-      allDeliveryNos.forEach(deliveryIdentifier => {
-          const status1 = map1.get(deliveryIdentifier);
-          const status2 = map2.get(deliveryIdentifier);
-
-          if (status1 === undefined && status2 !== undefined) {
-              // Nová zakázka v importu 2
-              const key = `new_order_${status2}`;
-              results[key] = (results[key] || 0) + 1;
-          } else if (status1 !== undefined && status2 === undefined) {
-              // Zakázka odstraněna v importu 2 (nebo není přítomna)
-              const key = `removed_order_${status1}`;
-              results[key] = (results[key] || 0) + 1;
-          } else if (status1 !== undefined && status2 !== undefined && status1 !== status2) {
-              // Status se změnil
-              const transitionKey = `${status1}_to_${status2}`;
-              results[transitionKey] = (results[transitionKey] || 0) + 1;
-          }
-      });
-
-      setComparisonResults(results);
-
-    } catch (e) {
-      console.error("Caught error during import comparison:", e);
-      setComparisonResults({});
-    }
-  };
-
-
-  // Komponenta pro modální okno (používá se pro detaily vyhledávání a seznam zakázek)
-  const Modal = ({ title, children, onClose }) => (
-    <div className="fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center z-50 p-4">
-      <div className="bg-gray-800 rounded-xl shadow-2xl p-6 relative w-full max-w-3xl max-h-[90vh] overflow-y-auto">
-        <button
-          onClick={onClose}
-          className="absolute top-3 right-3 text-gray-400 hover:text-white transition-colors"
-          title={t.close}
-        >
-          <XCircle className="w-6 h-6" />
-        </button>
-        <h2 className="text-2xl font-bold mb-4 text-blue-400 text-center">{title}</h2>
-        {children}
-      </div>
-    </div>
-  );
-
-  // Nová komponenta pro zobrazení detailů jedné zakázky
-  const OrderDetailsModal = ({ order, onClose, onShowStatusHistory, onSaveNote }) => {
-    const [note, setNote] = useState(order.Note || '');
-
-    useEffect(() => {
-      setNote(order.Note || '');
-    }, [order.Note]);
-
-    const handleNoteBlur = () => {
-      if (note !== order.Note) { // Only save if the note has actually changed
-        onSaveNote(order["Delivery No"], note);
-      }
-    };
-
+  // Zobrazení načítacího stavu, dokud není komponenta na klientovi
+  if (!isClient || isLoadingData) {
     return (
-      <Modal title={t.deliveryDetails} onClose={onClose}>
-        {order ? (
-          <div className="space-y-3 text-gray-200">
-            <p><strong>{t.deliveryNo}:</strong> {order["Delivery No"]}</p>
-            <p><strong>{t.status}:</strong> {order.Status}</p>
-            <p><strong>{t.deliveryType}:</strong> {order["del.type"]}</p>
-            <p><strong>{t.loadingDate}:</strong> {order["Loading Date"] ? format(parseExcelDate(order["Loading Date"]), 'dd/MM/yyyy') : 'N/A'}</p>
-            <p><strong>{t.forwardingAgent}:</strong> {order["Forwarding agent name"] || 'N/A'}</p>
-            <p><strong>{t.shipToPartyName}:</strong> {order["Name of ship-to party"] || 'N/A'}</p>
-            <p><strong>{t.totalWeight}:</strong> {order["Total Weight"] || 'N/A'}</p>
-            <p><strong>{t.billOfLading}:</strong> {order["Bill of lading"] || 'N/A'}</p> {/* Zobrazení "Bill of lading" */}
-            <div>
-              <strong>{t.note}:</strong>
-              <input
-                type="text"
-                value={note}
-                onChange={(e) => setNote(e.target.value)}
-                onBlur={handleNoteBlur} // Save on blur
-                className="w-full p-1 rounded-md bg-gray-600 border border-gray-500 text-gray-100 text-sm focus:ring-blue-500 focus:border-blue-500 mt-1"
-                placeholder={t.note}
-              />
-            </div>
-            {order.processingTime && <p><strong>{t.processingTime}:</strong> {order.processingTime}</p>}
-            <div className="mt-4 flex justify-end">
-              <button
-                onClick={() => onShowStatusHistory(order["Delivery No"])}
-                className="bg-blue-600 text-white px-4 py-2 rounded-lg shadow hover:bg-blue-700 transition-colors flex items-center gap-2"
-              >
-                <History className="w-5 h-5" /> {t.statusHistory}
-              </button>
-            </div>
-          </div>
-        ) : (
-          <p className="text-center text-gray-400">{t.deliveryNotFound}</p>
-        )}
-      </Modal>
+      <div className="flex items-center justify-center min-h-screen bg-gray-950 text-white">
+        <p>Loading application...</p>
+      </div>
     );
-  };
-
-
-  // Komponenta pro zobrazení seznamu zakázek v modalu (používá se pro CardClick)
-  const OrderListTable = ({ orders, onSelectOrder }) => (
-    <div className="overflow-x-auto mt-4">
-      {orders.length > 0 ? (
-        <table className="min-w-full bg-gray-700 rounded-lg overflow-hidden">
-          <thead className="bg-gray-600">
-            <tr>
-              <th className="py-3 px-4 text-left text-sm font-semibold text-gray-100">{t.deliveryNo}</th>
-              <th className="py-3 px-4 text-left text-sm font-semibold text-gray-100">{t.status}</th>
-              <th className="py-3 px-4 text-left text-sm font-semibold text-gray-100">{t.deliveryType}</th>
-              <th className="py-3 px-4 text-left text-sm font-semibold text-gray-100">{t.loadingDate}</th>
-              <th className="py-3 px-4 text-left text-sm font-semibold text-gray-100">{t.forwardingAgent}</th>
-              <th className="py-3 px-4 text-left text-sm font-semibold text-gray-100">{t.shipToPartyName}</th>
-              <th className="py-3 px-4 text-left text-sm font-semibold text-gray-100">{t.totalWeight}</th>
-              <th className="py-3 px-4 text-left text-sm font-semibold text-gray-100">{t.billOfLading}</th> {/* Nový sloupec */}
-              <th className="py-3 px-4 text-left text-sm font-semibold text-gray-100">{t.note}</th>
-            </tr>
-          </thead>
-          <tbody>
-            {orders.map((order, index) => (
-              <tr 
-                key={order["Delivery No"] || index} 
-                className={`border-t border-gray-600 cursor-pointer ${index % 2 === 0 ? "bg-gray-750" : "bg-gray-700"} hover:bg-gray-600 transition-colors`}
-                onClick={() => onSelectOrder(order)} // Click opens OrderDetailsModal
-              >
-                <td className="py-3 px-4 text-gray-200">{order["Delivery No"]}</td>
-                <td className="py-3 px-4 text-gray-200">{order.Status}</td>
-                <td className="py-3 px-4 text-gray-200">{order["del.type"]}</td>
-                <td className="py-3 px-4 text-gray-200">{order["Loading Date"] ? format(parseExcelDate(order["Loading Date"]), 'dd/MM/yyyy') : 'N/A'}</td>
-                <td className="py-3 px-4 text-gray-200">{order["Forwarding agent name"] || 'N/A'}</td>
-                <td className="py-3 px-4 text-gray-200">{order["Name of ship-to party"] || 'N/A'}</td>
-                <td className="py-3 px-4 text-gray-200">{order["Total Weight"] || 'N/A'}</td>
-                <td className="py-3 px-4 text-gray-200">{order["Bill of lading"] || 'N/A'}</td> {/* Zobrazení "Bill of lading" */}
-                <td className="py-3 px-4 text-gray-200">{order.Note || 'N/A'}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      ) : (
-        <p className="text-center text-gray-400">{t.noDataAvailable}</p>
-      )}
-    </div>
-  );
-
+  }
 
   // Autentikační formulář
   if (!isAuthenticated) {
     return (
       <div className={`flex items-center justify-center min-h-screen ${darkMode ? "bg-gray-950 text-gray-100" : "bg-white text-gray-900"} transition-colors duration-300`}>
         <Card className="p-8 max-w-md w-full">
-          <h2 className="text-3xl font-bold mb-6 text-center text-blue-400">{t.loginTitle}</h2>
+          <h2 className="text-3xl font-bold mb-6 text-center text-blue-400">
+            {isRegistering ? t.registerTitle : t.loginTitle}
+          </h2>
           <div className="space-y-4">
             <div>
               <label htmlFor="username" className="block text-sm font-medium text-gray-300">
                 {t.username}
               </label>
               <input
-                type="text"
+                type="email" // Use type="email" for better UX with Firebase Auth
                 id="username"
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
                 className="mt-1 block w-full p-2 rounded-md bg-gray-700 border border-gray-600 text-gray-100 focus:ring-blue-500 focus:border-blue-500"
+                placeholder="email@example.com"
               />
             </div>
             <div>
@@ -1812,20 +2575,71 @@ export default function ZakazkyDashboard() {
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 className="mt-1 block w-full p-2 rounded-md bg-gray-700 border border-gray-600 text-gray-100 focus:ring-blue-500 focus:border-blue-500"
+                placeholder="********"
               />
             </div>
             {loginError && <p className="text-red-500 text-sm text-center">{loginError}</p>}
+            {registerMessage && <p className={`text-sm text-center ${registerMessage.includes(t.registerError) ? 'text-red-500' : 'text-green-500'}`}>{registerMessage}</p>}
+
+            {isRegistering ? (
+              <button
+                onClick={handleRegister}
+                className="w-full bg-green-600 text-white py-2 rounded-lg shadow hover:bg-green-700 transition-colors flex items-center justify-center gap-2"
+                disabled={!isFirebaseReady} // Disable if Firebase is not ready
+              >
+                <UserPlus className="w-5 h-5" /> {t.register}
+              </button>
+            ) : (
+              <>
+                <button
+                  onClick={handleLogin}
+                  className="w-full bg-blue-600 text-white py-2 rounded-lg shadow hover:bg-blue-700 transition-colors flex items-center justify-center gap-2"
+                  disabled={!isFirebaseReady} // Disable if Firebase is not ready
+                >
+                  <Lock className="w-5 h-5" /> {t.loginButton}
+                </button>
+                <button
+                  onClick={handleGoogleSignIn}
+                  className="w-full bg-red-600 text-white py-2 rounded-lg shadow hover:bg-red-700 transition-colors flex items-center justify-center gap-2 mt-2"
+                  disabled={!isFirebaseReady} // Disable if Firebase is not ready
+                >
+                  <Mail className="w-5 h-5" /> {t.googleSignIn}
+                </button>
+              </>
+            )}
             <button
-              onClick={handleLogin}
-              className="w-full bg-blue-600 text-white py-2 rounded-lg shadow hover:bg-blue-700 transition-colors flex items-center justify-center gap-2"
+              onClick={() => {
+                setIsRegistering(!isRegistering);
+                setLoginError("");
+                setRegisterMessage("");
+                setUsername("");
+                setPassword("");
+              }}
+              className="w-full text-blue-400 hover:underline mt-2 text-sm"
             >
-              <Lock className="w-5 h-5" /> {t.loginButton}
+              {isRegistering ? t.loginButton : t.register}
             </button>
           </div>
         </Card>
       </div>
     );
   }
+
+  // Funkce pro získání dat pro konkrétní denní souhrn
+  const getDailySummaryForDate = (date) => {
+    const formattedDate = format(date, 'yyyy-MM-dd');
+    return summary?.dailySummaries.find(d => d.date === formattedDate);
+  };
+
+  const today = startOfDay(new Date());
+  const datesForOverview = [
+    subDays(today, 2),
+    subDays(today, 1),
+    today,
+    addDays(today, 1),
+    addDays(today, 2),
+    addDays(today, 3),
+  ];
 
   // Hlavní dashboard UI
   return (
@@ -1883,7 +2697,6 @@ export default function ZakazkyDashboard() {
         </button>
       </div>
 
-      {/* Historie importů - přesunuta sem */}
       {importHistory.length > 0 && (
         <div className="bg-gray-800 p-4 rounded-xl shadow-lg max-w-lg mx-auto">
           <h2 className="text-lg font-semibold text-gray-200 mb-3 flex items-center gap-2">
@@ -1916,17 +2729,16 @@ export default function ZakazkyDashboard() {
         </div>
       )}
 
-      {/* Modální okno pro detaily jedné zakázky (nové) */}
       {selectedOrderDetails && (
         <OrderDetailsModal
           order={selectedOrderDetails}
           onClose={() => setSelectedOrderDetails(null)}
           onShowStatusHistory={handleShowStatusHistory}
-          onSaveNote={handleSaveNote} // Pass the save function
+          onSaveNote={handleSaveNote}
+          t={t}
         />
       )}
 
-      {/* Modální okno pro potvrzení smazání */}
       {showDeleteConfirm && (
         <Modal title={t.deleteConfirm} onClose={() => setShowDeleteConfirm(false)}>
           <p className="text-lg mb-4 text-center">{t.deleteConfirm}</p>
@@ -1947,14 +2759,12 @@ export default function ZakazkyDashboard() {
         </Modal>
       )}
 
-      {/* Modální okno pro seznam zakázek (po kliknutí na karty) */}
       {showOrderListModal && (
         <Modal title={modalTitle} onClose={() => setShowOrderListModal(false)}>
-          <OrderListTable orders={modalOrders} onSelectOrder={setSelectedOrderDetails} />
+          <OrderListTable orders={modalOrders} onSelectOrder={setSelectedOrderDetails} t={t} />
         </Modal>
       )}
 
-      {/* Modální okno pro historii statusů */}
       {showStatusHistoryModal && (
         <Modal title={`${t.statusHistory} - ${currentDeliveryNo}`} onClose={() => setShowStatusHistoryModal(false)}>
           {deliveryStatusLog.length > 0 ? (
@@ -1971,7 +2781,6 @@ export default function ZakazkyDashboard() {
         </Modal>
       )}
 
-
       {!summary && (
         <p className="text-gray-400 text-center mt-8">{t.uploadFilePrompt}</p>
       )}
@@ -1979,35 +2788,59 @@ export default function ZakazkyDashboard() {
       {summary && (
         <div id="report-section" className="space-y-10">
           {/* Navigace záložek */}
-          <div className="flex space-x-1 rounded-xl bg-gray-800 p-1 mb-8 max-w-2xl mx-auto">
+          <div className="flex space-x-1 rounded-xl bg-gray-800 p-1 mb-8 max-w-6xl mx-auto overflow-x-auto">
             <button
               onClick={() => setActiveTab(0)}
-              className={`w-full py-2.5 text-sm leading-5 font-medium rounded-lg focus:outline-none focus:ring-2 ring-offset-2 ring-offset-gray-700 ring-white ring-opacity-60 ${activeTab === 0 ? 'bg-blue-600 text-white shadow' : 'text-blue-100 hover:bg-white/[0.12] hover:text-white'}`}
+              className={`flex-shrink-0 w-full md:w-auto px-4 py-2.5 text-sm leading-5 font-medium rounded-lg focus:outline-none focus:ring-2 ring-offset-2 ring-offset-gray-700 ring-white ring-opacity-60 ${activeTab === 0 ? 'bg-blue-600 text-white shadow' : 'text-blue-100 hover:bg-white/[0.12] hover:text-white'}`}
             >
               {t.dashboardTab}
             </button>
             <button
               onClick={() => setActiveTab(1)}
-              className={`w-full py-2.5 text-sm leading-5 font-medium rounded-lg focus:outline-none focus:ring-2 ring-offset-2 ring-offset-gray-700 ring-white ring-opacity-60 ${activeTab === 1 ? 'bg-blue-600 text-white shadow' : 'text-blue-100 hover:bg-white/[0.12] hover:text-white'}`}
+              className={`flex-shrink-0 w-full md:w-auto px-4 py-2.5 text-sm leading-5 font-medium rounded-lg focus:outline-none focus:ring-2 ring-offset-2 ring-offset-gray-700 ring-white ring-opacity-60 ${activeTab === 1 ? 'bg-blue-600 text-white shadow' : 'text-blue-100 hover:bg-white/[0.12] hover:text-white'}`}
             >
               {t.delayedOrdersTab}
             </button>
             <button
               onClick={() => setActiveTab(2)}
-              className={`w-full py-2.5 text-sm leading-5 font-medium rounded-lg focus:outline-none focus:ring-2 ring-offset-2 ring-offset-gray-700 ring-white ring-opacity-60 ${activeTab === 2 ? 'bg-blue-600 text-white shadow' : 'text-blue-100 hover:bg-white/[0.12] hover:text-white'}`}
+              className={`flex-shrink-0 w-full md:w-auto px-4 py-2.5 text-sm leading-5 font-medium rounded-lg focus:outline-none focus:ring-2 ring-offset-2 ring-offset-gray-700 ring-white ring-opacity-60 ${activeTab === 2 ? 'bg-blue-600 text-white shadow' : 'text-blue-100 hover:bg-white/[0.12] hover:text-white'}`}
             >
               {t.importComparisonTab}
             </button>
             <button
-              onClick={() => setActiveTab(3)} // New tab for Order Search
-              className={`w-full py-2.5 text-sm leading-5 font-medium rounded-lg focus:outline-none focus:ring-2 ring-offset-2 ring-offset-gray-700 ring-white ring-opacity-60 ${activeTab === 3 ? 'bg-blue-600 text-white shadow' : 'text-blue-100 hover:bg-white/[0.12] hover:text-white'}`}
+              onClick={() => setActiveTab(3)}
+              className={`flex-shrink-0 w-full md:w-auto px-4 py-2.5 text-sm leading-5 font-medium rounded-lg focus:outline-none focus:ring-2 ring-offset-2 ring-offset-gray-700 ring-white ring-opacity-60 ${activeTab === 3 ? 'bg-blue-600 text-white shadow' : 'text-blue-100 hover:bg-white/[0.12] hover:text-white'}`}
             >
               {t.orderSearchTab}
+            </button>
+            <button
+              onClick={() => setActiveTab(4)}
+              className={`flex-shrink-0 w-full md:w-auto px-4 py-2.5 text-sm leading-5 font-medium rounded-lg focus:outline-none focus:ring-2 ring-offset-2 ring-offset-gray-700 ring-white ring-opacity-60 ${activeTab === 4 ? 'bg-blue-600 text-white shadow' : 'text-blue-100 hover:bg-white/[0.12] hover:text-white'}`}
+            >
+              {t.dailySummary}
+            </button>
+            <button
+              onClick={() => setActiveTab(5)}
+              className={`flex-shrink-0 w-full md:w-auto px-4 py-2.5 text-sm leading-5 font-medium rounded-lg focus:outline-none focus:ring-2 ring-offset-2 ring-offset-gray-700 ring-white ring-opacity-60 ${activeTab === 5 ? 'bg-blue-600 text-white shadow' : 'text-blue-100 hover:bg-white/[0.12] hover:text-white'}`}
+            >
+              {t.ticketsTab}
+            </button>
+            <button
+              onClick={() => setActiveTab(6)}
+              className={`flex-shrink-0 w-full md:w-auto px-4 py-2.5 text-sm leading-5 font-medium rounded-lg focus:outline-none focus:ring-2 ring-offset-2 ring-offset-gray-700 ring-white ring-opacity-60 ${activeTab === 6 ? 'bg-blue-600 text-white shadow' : 'text-blue-100 hover:bg-white/[0.12] hover:text-white'}`}
+            >
+              {t.profileTab}
+            </button>
+            <button
+              onClick={() => setActiveTab(7)}
+              className={`flex-shrink-0 w-full md:w-auto px-4 py-2.5 text-sm leading-5 font-medium rounded-lg focus:outline-none focus:ring-2 ring-offset-2 ring-offset-gray-700 ring-white ring-opacity-60 ${activeTab === 7 ? 'bg-blue-600 text-white shadow' : 'text-blue-100 hover:bg-white/[0.12] hover:text-white'}`}
+            >
+              {t.chatTab}
             </button>
           </div>
 
           {/* Obsah záložek */}
-          {activeTab === 0 && ( // Dashboard Tab Content
+          {activeTab === 0 && (
             <>
               {/* Sekce datových filtrů - kompaktní a sbalitelná */}
               <Card className="bg-gray-800 p-4 rounded-xl shadow-lg">
@@ -2037,8 +2870,8 @@ export default function ZakazkyDashboard() {
                         className="w-full p-1.5 text-sm rounded-md bg-gray-700 border border-gray-600 text-gray-100 focus:ring-blue-500 focus:border-blue-500"
                       >
                         <option value="all">All</option>
-                        <option value="yesterday">{format(subDays(startOfDay(new Date()), 1), 'dd/MM/yyyy')}</option>
-                        <option value="today">{format(startOfDay(new Date()), 'dd/MM/yyyy')}</option>
+                        <option value="yesterday">{t.yesterday}</option>
+                        <option value="today">{t.today}</option>
                         <option value="last7days">{t.last7Days}</option>
                         <option value="thisMonth">{t.thisMonth}</option>
                         <option value="custom">{t.customRange}</option>
@@ -2118,39 +2951,129 @@ export default function ZakazkyDashboard() {
                 )}
               </Card>
 
-              {/* Status Distribution Chart (Moved to top) */}
+              {/* Původní přehledové karty */}
+              {summary && (
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7 gap-6">
+                  <Card>
+                    <CardContent>
+                      <p className="text-gray-400">{t.total}</p>
+                      <p className="text-3xl font-bold text-blue-400">{summary.total}</p>
+                    </CardContent>
+                  </Card>
+                  <Card>
+                    <CardContent>
+                      <p className="text-gray-400">{t.done}</p>
+                      <p className="text-3xl font-bold text-green-400">{summary.doneTotal}</p>
+                    </CardContent>
+                  </Card>
+                  <Card>
+                    <CardContent>
+                      <p className="text-gray-400">{t.remaining}</p>
+                      <p className="text-3xl font-bold text-yellow-400">{summary.remainingTotal}</p>
+                    </CardContent>
+                  </Card>
+                  <Card>
+                    <CardContent>
+                      <p className="text-gray-400">{t.inProgress}</p>
+                      <p className="text-3xl font-bold text-orange-400">{summary.inProgressTotal}</p>
+                    </CardContent>
+                  </Card>
+                  <Card>
+                    <CardContent>
+                      <p className="text-gray-400">{t.newOrders}</p>
+                      <p className="text-3xl font-bold text-purple-400">{summary.newOrdersTotal}</p>
+                    </CardContent>
+                  </Card>
+                  <Card>
+                    <CardContent>
+                      <p className="text-gray-400">{t.pallets}</p>
+                      <p className="text-3xl font-bold text-pink-400">{summary.palletsTotal}</p>
+                    </CardContent>
+                  </Card>
+                  <Card>
+                    <CardContent>
+                      <p className="text-gray-400">{t.carton}</p>
+                      <p className="text-3xl font-bold text-cyan-400">{summary.cartonsTotal}</p>
+                    </CardContent>
+                  </Card>
+                </div>
+              )}
+
+              {/* Daily Overview Cards - for 2 days back, today, 3 days forward */}
+              <div className="mb-8">
+                <h2 className="text-2xl font-semibold mb-4 flex items-center gap-2">
+                  <ClipboardList className="w-6 h-6 text-green-400" /> {t.dailyOverview}
+                </h2>
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-6">
+                  {datesForOverview.map((date, index) => {
+                    const dailyStats = getDailySummaryForDate(date);
+                    const isToday = format(date, 'yyyy-MM-dd') === format(today, 'yyyy-MM-dd');
+                    const isYesterday = format(date, 'yyyy-MM-dd') === format(subDays(today, 1), 'yyyy-MM-dd');
+                    const isOlder = isBefore(date, today);
+                    const isFuture = isAfter(date, today);
+
+                    let dateLabel = format(date, 'dd/MM/yyyy');
+                    if (isToday) dateLabel = t.today;
+                    else if (isYesterday) dateLabel = t.yesterday;
+                    else if (isOlder) dateLabel = `${t.older} (${dateLabel})`;
+                    else if (isFuture) dateLabel = `${t.future} (${dateLabel})`;
+
+                    return (
+                      <Card key={index} className="flex flex-col justify-between h-full">
+                        <CardContent className="flex-grow">
+                          <p className="text-gray-400 text-center text-lg font-semibold mb-2">{dateLabel}</p>
+                          {dailyStats ? (
+                            <div className="space-y-1 text-sm">
+                              <p className="text-gray-200">{t.total}: <strong className="text-blue-300">{dailyStats.total}</strong></p>
+                              <p className="text-gray-200">{t.done}: <strong className="text-green-300">{dailyStats.done}</strong></p>
+                              <p className="text-gray-200">{t.remaining}: <strong className="text-yellow-300">{dailyStats.remaining}</strong></p>
+                              <p className="text-gray-200">{t.inProgress}: <strong className="text-orange-300">{dailyStats.inProgress}</strong></p>
+                              <p className="text-gray-200">{t.newOrders}: <strong className="text-purple-300">{dailyStats.newOrders}</strong></p>
+                            </div>
+                          ) : (
+                            <p className="text-center text-gray-400 text-sm">{t.noDataAvailable}</p>
+                          )}
+                        </CardContent>
+                      </Card>
+                    );
+                  })}
+                </div>
+              </div>
+
+
+              {/* Status Distribution Chart */}
               <div>
                 <h2 className="text-2xl font-semibold mb-4 flex items-center gap-2">
                   <BarChart3 className="w-6 h-6 text-blue-400" />{" "}
                   {t.statusDistribution}
                   <div className="ml-auto flex gap-2">
                     <button
-                      onClick={() => setChartTypeOrdersOverTime('bar')}
-                      className={`p-2 rounded-full ${chartTypeOrdersOverTime === 'bar' ? 'bg-blue-600' : 'bg-gray-700'} text-white hover:bg-blue-700 transition-colors`}
+                      onClick={() => setChartTypeStatus('bar')}
+                      className={`p-2 rounded-full ${chartTypeStatus === 'bar' ? 'bg-blue-600' : 'bg-gray-700'} text-white hover:bg-blue-700 transition-colors`}
                       title={t.barChart}
                     >
                       <BarChart3 className="w-5 h-5" />
                     </button>
                     <button
-                      onClick={() => setChartTypeOrdersOverTime('pie')}
-                      className={`p-2 rounded-full ${chartTypeOrdersOverTime === 'pie' ? 'bg-blue-600' : 'bg-gray-700'} text-white hover:bg-blue-700 transition-colors`}
+                      onClick={() => setChartTypeStatus('pie')}
+                      className={`p-2 rounded-full ${chartTypeStatus === 'pie' ? 'bg-blue-600' : 'bg-gray-700'} text-white hover:bg-blue-700 transition-colors`}
                       title={t.pieChart}
                     >
                       <PieChartIcon className="w-5 h-5" />
                     </button>
                     <button
-                      onClick={() => setChartTypeOrdersOverTime('stackedBar')}
-                      className={`p-2 rounded-full ${chartTypeOrdersOverTime === 'stackedBar' ? 'bg-blue-600' : 'bg-gray-700'} text-white hover:bg-blue-700 transition-colors`}
+                      onClick={() => setChartTypeStatus('stackedBar')}
+                      className={`p-2 rounded-full ${chartTypeStatus === 'stackedBar' ? 'bg-blue-600' : 'bg-gray-700'} text-white hover:bg-blue-700 transition-colors`}
                       title={t.stackedBarChart}
                     >
-                      <BarChart3 className="w-5 h-5 rotate-90" /> {/* Rotated icon for stacked */}
+                      <BarChart3 className="w-5 h-5 rotate-90" />
                     </button>
                   </div>
                 </h2>
                 <div className="bg-gradient-to-r from-gray-800 to-gray-700 p-6 rounded-xl shadow-md">
                   {statusPieData.length > 0 ? (
                     <ResponsiveContainer width="100%" height={320}>
-                      {chartTypeOrdersOverTime === 'bar' ? (
+                      {chartTypeStatus === 'bar' ? (
                         <BarChart
                           data={statusPieData}
                         >
@@ -2179,35 +3102,35 @@ export default function ZakazkyDashboard() {
                             radius={[6, 6, 0, 0]}
                             animationDuration={800}
                           >
-                            <LabelList dataKey="value" position="top" fill="#E5E7EB" />
+                            {/* <LabelList dataKey="value" position="top" fill="#E5E7EB" /> */}
                           </Bar>
                         </BarChart>
-                      ) : chartTypeOrdersOverTime === 'pie' ? (
-                        <PieChart>
-                          <Pie
-                            activeIndex={activeIndexStatus}
-                            activeShape={renderActiveShape}
-                            data={statusPieData}
-                            cx="50%"
-                            cy="50%"
-                            innerRadius={60}
-                            outerRadius={80}
-                            fill="#8884d8"
-                            dataKey="value"
-                            onMouseEnter={onPieEnterStatus}
-                          >
-                            {statusPieData.map((entry, index) => (
-                              <Cell key={`cell-${index}`} fill={CHART_COLORS[index % CHART_COLORS.length]} />
-                            ))}
-                          </Pie>
-                          <Tooltip
-                            contentStyle={{ backgroundColor: '#374151', border: 'none', borderRadius: '8px' }}
-                            labelStyle={{ color: '#E5E7EB' }}
-                            itemStyle={{ color: '#E5E7EB' }}
-                          />
-                          <Legend wrapperStyle={{ color: '#E5E7EB', paddingTop: '10px' }} />
-                        </PieChart>
-                      ) : ( // Stacked Bar Chart by Loading Date
+                      ) : chartTypeStatus === 'pie' ? (
+                          <PieChart>
+                            <Pie
+                              activeIndex={activeIndexStatus}
+                              activeShape={renderActiveShape}
+                              data={statusPieData}
+                              cx="50%"
+                              cy="50%"
+                              innerRadius={60}
+                              outerRadius={80}
+                              fill="#8884d8"
+                              dataKey="value"
+                              onMouseEnter={onPieEnterStatus}
+                            >
+                              {statusPieData.map((entry, index) => (
+                                <Cell key={`cell-${index}`} fill={CHART_COLORS[index % CHART_COLORS.length]} />
+                              ))}
+                            </Pie>
+                            <Tooltip
+                              contentStyle={{ backgroundColor: '#374151', border: 'none', borderRadius: '8px' }}
+                              labelStyle={{ color: '#E5E7EB' }}
+                              itemStyle={{ color: '#E5E7EB' }}
+                            />
+                            <Legend wrapperStyle={{ color: '#E5E7EB', paddingTop: '10px' }} />
+                          </PieChart>
+                      ) : (
                         <BarChart
                           data={statusStackedChartData}
                           margin={{ top: 20, right: 30, left: 0, bottom: 5 }}
@@ -2221,59 +3144,24 @@ export default function ZakazkyDashboard() {
                             itemStyle={{ color: '#E5E7EB' }}
                           />
                           <Legend wrapperStyle={{ color: '#E5E7EB', paddingTop: '10px' }} />
-                          {/* Dynamicky přidáme Bar komponenty pro každý status */}
                           {uniqueStatuses.map(status => (
-                            <Bar key={`status-bar-${status}`} dataKey={`status${status}`} name={`Status ${status}`} fill={CHART_COLORS[status % CHART_COLORS.length]} stackId="statusStack" />
+                            <Bar key={`status-bar-${status}`} dataKey={`status${status}`} name={`Status ${status}`} fill={CHART_COLORS[status % CHART_COLORS.length]} stackId="statusStack" >
+                              {/* <LabelList dataKey={`status${status}`} position="top" fill="#E5E7EB" /> */}
+                            </Bar>
                           ))}
                         </BarChart>
                       )}
                     </ResponsiveContainer>
                   ) : (
                     <div className="flex items-center justify-center h-80 bg-gray-700 text-gray-400 rounded-xl">
-                      <p className="text-lg">{t.noDataAvailable}</p>
+                        <p className="text-lg">{t.noDataAvailable}</p>
                     </div>
                   )}
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mt-6">
-                {Object.entries(summary.byDay).map(
-                  ([date, stats]) => (
-                    <Card key={date}>
-                      <CardContent>
-                        <h2 className="text-lg font-semibold text-blue-400 mb-2">
-                          {format(new Date(date), 'dd/MM/yyyy')}
-                        </h2>
-                        <p className="text-gray-200 cursor-pointer hover:text-blue-300" onClick={() => handleCardClick('total', [], null, date)}>
-                          {t.total}: <strong>{stats.total}</strong>
-                        </p>
-                        <p className="text-green-400 cursor-pointer hover:text-green-300" onClick={() => handleCardClick('done', [50, 60, 70], null, date)}>
-                          {t.done}: <strong>{stats.done}</strong>
-                        </p>
-                        <p className="text-red-400 cursor-pointer hover:text-red-300" onClick={() => handleCardClick('remaining', [10, 31, 35, 40], null, date)}>
-                          {t.remaining}:{" "}
-                          <strong>
-                            {stats.remaining}
-                          </strong>
-                        </p>
-                        <p className="text-yellow-400 cursor-pointer hover:text-yellow-300" onClick={() => handleCardClick('inProgress', [31, 35, 40], null, date)}>
-                          {t.inProgress}: <strong>{stats.inProgress}</strong>
-                        </p>
-                        <p className="text-blue-400 cursor-pointer hover:text-blue-300" onClick={() => handleCardClick('newOrders', [10], null, date)}>
-                          {t.newOrders}: <strong>{stats.newOrders}</strong>
-                        </p>
-                        <p className="text-gray-200 cursor-pointer hover:text-gray-300" onClick={() => handleCardClick('pallets', [], 'P', date)}>
-                          {t.pallets}: <strong>{stats.pallets}</strong>
-                        </p>
-                        <p className="text-gray-200 cursor-pointer hover:text-gray-300" onClick={() => handleCardClick('carton', [], 'K', date)}>
-                          {t.carton}: <strong>{stats.cartons}</strong>
-                        </p>
-                      </CardContent>
-                    </Card>
-                  )
-                )}
-
-                {/* Overall Statuses Card */}
+              {/* Overall Statuses Card and Delivery Types and Overall Delayed Orders Card */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mt-6">
                 <Card>
                   <CardContent>
                     <h2 className="text-lg font-semibold text-green-400 flex items-center gap-1 mb-2">
@@ -2295,7 +3183,6 @@ export default function ZakazkyDashboard() {
                   </CardContent>
                 </Card>
 
-                {/* Delivery Types and Overall Delayed Orders Card */}
                 <Card>
                   <CardContent>
                     <h2 className="text-lg font-semibold text-indigo-400 flex items-center gap-1 mb-2">
@@ -2335,7 +3222,7 @@ export default function ZakazkyDashboard() {
                 {/* Orders Over Time Chart */}
                 <div>
                   <h2 className="text-2xl font-semibold mb-4 flex items-center gap-2">
-                    <BarChart3 className="w-6 h-6 text-blue-400" />{" "}
+                    <BarChart3 className="w-6 h-6 text-orange-400" />{" "}
                     {t.ordersOverTime}
                     <div className="ml-auto flex gap-2">
                       <button
@@ -2362,7 +3249,13 @@ export default function ZakazkyDashboard() {
                             data={ordersOverTimeData}
                             margin={{ top: 20, right: 30, left: 0, bottom: 5 }}
                           >
-                            <XAxis dataKey="date" stroke="#E5E7EB" tick={{ fill: "#E5E7EB" }} axisLine={{ stroke: "#4B5563" }} />
+                            <XAxis
+                              dataKey="date"
+                              stroke="#E5E7EB"
+                              tick={{ fill: "#E5E7EB" }}
+                              axisLine={{ stroke: "#4B5563" }}
+                              tickFormatter={(tick) => format(new Date(tick), 'dd/MM')}
+                            />
                             <YAxis allowDecimals={false} stroke="#E5E7EB" tick={{ fill: "#E5E7EB" }} axisLine={{ stroke: "#4B5563" }} />
                             <Tooltip
                               cursor={{ fill: 'rgba(255,255,255,0.1)' }}
@@ -2371,28 +3264,40 @@ export default function ZakazkyDashboard() {
                               itemStyle={{ color: '#E5E7EB' }}
                             />
                             <Legend wrapperStyle={{ color: '#E5E7EB', paddingTop: '10px' }} />
-                            <Bar dataKey="celkem" name={t.total} fill="#FFFFFF" radius={[6, 6, 0, 0]} animationDuration={800}>
-                              <LabelList dataKey="celkem" position="top" fill="#E5E7EB" />
+                            <Bar dataKey="total" name={t.total} fill="#FFFFFF" radius={[6, 6, 0, 0]} animationDuration={800}>
+                              {/* <LabelList dataKey="total" position="top" fill="#E5E7EB" /> */}
                             </Bar>
-                            <Bar dataKey="zbývá" name={t.remaining} fill={CHART_COLORS[1]} radius={[6, 6, 0, 0]} animationDuration={800}>
-                              <LabelList dataKey="zbývá" position="top" fill="#E5E7EB" />
+                            <Bar dataKey="remaining" name={t.remaining} fill={CHART_COLORS[1]} radius={[6, 6, 0, 0]} animationDuration={800}>
+                              {/* <LabelList dataKey="remaining" position="top" fill="#E5E7EB" /> */}
                             </Bar>
-                            <Bar dataKey="nové" name={t.newOrders} fill={CHART_COLORS[2]} radius={[6, 6, 0, 0]} animationDuration={800}>
-                              <LabelList dataKey="nové" position="top" fill="#E5E7EB" />
+                            <Bar dataKey="new" name={t.newOrders} fill={CHART_COLORS[2]} radius={[6, 6, 0, 0]} animationDuration={800}>
+                              {/* <LabelList dataKey="new" position="top" fill="#E5E7EB" /> */}
                             </Bar>
-                            <Bar dataKey="v procesu" name={t.inProgress} fill={CHART_COLORS[3]} radius={[6, 6, 0, 0]} animationDuration={800}>
-                              <LabelList dataKey="v procesu" position="top" fill="#E5E7EB" />
+                            <Bar dataKey="inProgress" name={t.inProgress} fill={CHART_COLORS[3]} radius={[6, 6, 0, 0]} animationDuration={800}>
+                              {/* <LabelList dataKey="inProgress" position="top" fill="#E5E7EB" /> */}
                             </Bar>
-                            <Bar dataKey="hotovo" name={t.done} fill={CHART_COLORS[4]} radius={[6, 6, 0, 0]} animationDuration={800}>
-                              <LabelList dataKey="hotovo" position="top" fill="#E5E7EB" />
+                            <Bar dataKey="completed" name={t.done} fill={CHART_COLORS[4]} radius={[6, 6, 0, 0]} animationDuration={800}>
+                              {/* <LabelList dataKey="completed" position="top" fill="#E5E7EB" /> */}
                             </Bar>
+                            <Brush dataKey="date" height={30} stroke="#8884d8" travellerWidth={10}>
+                              <AreaChart>
+                                <YAxis hide domain={['auto', 'auto']} />
+                                <Area type="monotone" dataKey="total" stroke="#8884d8" fill="#8884d8" />
+                              </AreaChart>
+                            </Brush>
                           </BarChart>
                         ) : (
                           <LineChart
                             data={ordersOverTimeData}
                             margin={{ top: 20, right: 30, left: 0, bottom: 5 }}
                           >
-                            <XAxis dataKey="date" stroke="#E5E7EB" tick={{ fill: "#E5E7EB" }} axisLine={{ stroke: "#4B5563" }} />
+                            <XAxis
+                              dataKey="date"
+                              stroke="#E5E7EB"
+                              tick={{ fill: "#E5E7EB" }}
+                              axisLine={{ stroke: "#4B5563" }}
+                              tickFormatter={(tick) => format(new Date(tick), 'dd/MM')}
+                            />
                             <YAxis allowDecimals={false} stroke="#E5E7EB" tick={{ fill: "#E5E7EB" }} axisLine={{ stroke: "#4B5563" }} />
                             <Tooltip
                               cursor={{ strokeDasharray: '3 3', stroke: 'rgba(255,255,255,0.3)' }}
@@ -2401,11 +3306,17 @@ export default function ZakazkyDashboard() {
                               itemStyle={{ color: '#E5E7EB' }}
                             />
                             <Legend wrapperStyle={{ color: '#E5E7EB', paddingTop: '10px' }} />
-                            <Line type="monotone" dataKey="celkem" name={t.total} stroke="#FFFFFF" activeDot={{ r: 8 }} animationDuration={800} />
-                            <Line type="monotone" dataKey="zbývá" name={t.remaining} stroke={CHART_COLORS[1]} activeDot={{ r: 8 }} animationDuration={800} />
-                            <Line type="monotone" dataKey="nové" name={t.newOrders} stroke={CHART_COLORS[2]} activeDot={{ r: 8 }} animationDuration={800} />
-                            <Line type="monotone" dataKey="v procesu" name={t.inProgress} stroke={CHART_COLORS[3]} activeDot={{ r: 8 }} animationDuration={800} />
-                            <Line type="monotone" dataKey="hotovo" name={t.done} stroke={CHART_COLORS[4]} activeDot={{ r: 8 }} animationDuration={800} />
+                            <Line type="monotone" dataKey="total" name={t.total} stroke="#FFFFFF" activeDot={{ r: 8 }} animationDuration={800} />
+                            <Line type="monotone" dataKey="remaining" name={t.remaining} stroke={CHART_COLORS[1]} activeDot={{ r: 8 }} animationDuration={800} />
+                            <Line type="monotone" dataKey="new" name={t.newOrders} stroke={CHART_COLORS[2]} activeDot={{ r: 8 }} animationDuration={800} />
+                            <Line type="monotone" dataKey="inProgress" name={t.inProgress} stroke={CHART_COLORS[3]} activeDot={{ r: 8 }} animationDuration={800} />
+                            <Line type="monotone" dataKey="completed" name={t.done} stroke={CHART_COLORS[4]} activeDot={{ r: 8 }} animationDuration={800} />
+                            <Brush dataKey="date" height={30} stroke="#8884d8" travellerWidth={10}>
+                              <AreaChart>
+                                <YAxis hide domain={['auto', 'auto']} />
+                                <Area type="monotone" dataKey="total" stroke="#8884d8" fill="#8884d8" />
+                              </AreaChart>
+                            </Brush>
                           </LineChart>
                         )}
                       </ResponsiveContainer>
@@ -2424,10 +3335,10 @@ export default function ZakazkyDashboard() {
                     {t.inProgressOnly}
                   </h2>
                   <div className="bg-gradient-to-r from-gray-800 to-gray-700 p-6 rounded-xl shadow-md">
-                    {inProgressOnlyChartData.length > 0 ? (
+                    {inProgressOnlyData.length > 0 ? (
                       <ResponsiveContainer width="100%" height={320}>
                         <BarChart
-                          data={inProgressOnlyChartData}
+                          data={inProgressOnlyData}
                           margin={{ top: 20, right: 30, left: 0, bottom: 5 }}
                         >
                           <XAxis
@@ -2450,13 +3361,13 @@ export default function ZakazkyDashboard() {
                           />
                           <Legend wrapperStyle={{ color: '#E5E7EB', paddingTop: '10px' }} />
                           <Bar dataKey="status31" name="Status 31" fill={CHART_COLORS[9]} stackId="b">
-                            <LabelList dataKey="status31" position="top" fill="#E5E7EB" />
+                            {/* <LabelList dataKey="status31" position="top" fill="#E5E7EB" /> */}
                           </Bar>
                           <Bar dataKey="status35" name="Status 35" fill={CHART_COLORS[10]} stackId="b">
-                            <LabelList dataKey="status35" position="top" fill="#E5E7EB" />
+                            {/* <LabelList dataKey="status35" position="top" fill="#E5E7EB" /> */}
                           </Bar>
                           <Bar dataKey="status40" name="Status 40" fill={CHART_COLORS[11]} stackId="b">
-                            <LabelList dataKey="status40" position="top" fill="#E5E7EB" />
+                            {/* <LabelList dataKey="status40" position="top" fill="#E5E7EB" /> */}
                           </Bar>
                         </BarChart>
                       </ResponsiveContainer>
@@ -2475,10 +3386,10 @@ export default function ZakazkyDashboard() {
                     {t.shipments}
                   </h2>
                   <div className="bg-gradient-to-r from-gray-800 to-gray-700 p-6 rounded-xl shadow-md">
-                    {shipmentsChartData.length > 0 ? (
+                    {shipmentsData.length > 0 ? (
                       <ResponsiveContainer width="100%" height={320}>
                         <BarChart
-                          data={shipmentsChartData}
+                          data={shipmentsData}
                           margin={{ top: 20, right: 30, left: 0, bottom: 5 }}
                         >
                           <XAxis
@@ -2501,13 +3412,13 @@ export default function ZakazkyDashboard() {
                           />
                           <Legend wrapperStyle={{ color: '#E5E7EB', paddingTop: '10px' }} />
                           <Bar dataKey="status50" name="Status 50" fill={CHART_COLORS[4]} stackId="c">
-                            <LabelList dataKey="status50" position="top" fill="#E5E7EB" />
+                            {/* <LabelList dataKey="status50" position="top" fill="#E5E7EB" /> */}
                           </Bar>
                           <Bar dataKey="status60" name="Status 60" fill={CHART_COLORS[7]} stackId="c">
-                            <LabelList dataKey="status60" position="top" fill="#E5E7EB" />
+                            {/* <LabelList dataKey="status60" position="top" fill="#E5E7EB" /> */}
                           </Bar>
                           <Bar dataKey="status70" name="Status 70" fill={CHART_COLORS[8]} stackId="c">
-                            <LabelList dataKey="status70" position="top" fill="#E5E7EB" />
+                            {/* <LabelList dataKey="status70" position="top" fill="#E5E7EB" /> */}
                           </Bar>
                         </BarChart>
                       </ResponsiveContainer>
@@ -2521,7 +3432,7 @@ export default function ZakazkyDashboard() {
 
                 {/* New Chart: Shift Comparison (Hotovo) */}
                 <div>
-                  <h2 className="text-2xl font-semibold mb-4 flex items-center gap-2">
+                  <h2 className="2xl font-semibold mb-4 flex items-center gap-2">
                     <BarChart3 className="w-6 h-6 text-purple-400" />{" "}
                     {t.shiftComparison}
                   </h2>
@@ -2551,7 +3462,7 @@ export default function ZakazkyDashboard() {
                             itemStyle={{ color: '#E5E7EB' }}
                           />
                           <Bar dataKey="value" name={t.done} fill={CHART_COLORS[4]} radius={[6, 6, 0, 0]} animationDuration={800}>
-                            <LabelList dataKey="value" position="top" fill="#E5E7EB" />
+                            {/* <LabelList dataKey="value" position="top" fill="#E5E7EB" /> */}
                           </Bar>
                         </BarChart>
                       </ResponsiveContainer>
@@ -2588,7 +3499,7 @@ export default function ZakazkyDashboard() {
                         className={`p-2 rounded-full ${chartTypeOrderTypes === 'stackedBar' ? 'bg-blue-600' : 'bg-gray-700'} text-white hover:bg-blue-700 transition-colors`}
                         title={t.stackedBarChart}
                       >
-                        <BarChart3 className="w-5 h-5 rotate-90" /> {/* Rotated icon for stacked */}
+                        <BarChart3 className="w-5 h-5 rotate-90" />
                       </button>
                     </div>
                   </h2>
@@ -2624,7 +3535,7 @@ export default function ZakazkyDashboard() {
                               radius={[6, 6, 0, 0]}
                               animationDuration={800}
                             >
-                              <LabelList dataKey="value" position="top" fill="#E5E7EB" />
+                              {/* <LabelList dataKey="value" position="top" fill="#E5E7EB" /> */}
                             </Bar>
                           </BarChart>
                         ) : chartTypeOrderTypes === 'pie' ? (
@@ -2652,7 +3563,7 @@ export default function ZakazkyDashboard() {
                             />
                             <Legend wrapperStyle={{ color: '#E5E7EB', paddingTop: '10px' }} />
                           </PieChart>
-                        ) : ( // Stacked Bar Chart
+                        ) : (
                           <BarChart
                             data={deliveryTypeStackedChartData}
                             margin={{ top: 20, right: 30, left: 0, bottom: 5 }}
@@ -2666,10 +3577,10 @@ export default function ZakazkyDashboard() {
                               itemStyle={{ color: '#E5E7EB' }}
                             />
                             <Legend wrapperStyle={{ color: '#E5E7EB', paddingTop: '10px' }} />
-                            <Bar key="today-delivery" dataKey="Today" name="Dnes" fill={DATE_CATEGORY_COLORS['Today']} stackId="deliveryDate" />
-                            <Bar key="yesterday-delivery" dataKey="Yesterday" name="Včera" fill={DATE_CATEGORY_COLORS['Yesterday']} stackId="deliveryDate" />
-                            <Bar key="older-delivery" dataKey="Older" name="Starší" fill={DATE_CATEGORY_COLORS['Older']} stackId="deliveryDate" />
-                            <Bar key="future-delivery" dataKey="Future" name="Budoucí" fill={DATE_CATEGORY_COLORS['Future']} stackId="deliveryDate" />
+                            <Bar key="today-delivery" dataKey="Today" name={t.today} fill={DATE_CATEGORY_COLORS['Today']} stackId="deliveryDate" />
+                            <Bar key="yesterday-delivery" dataKey="Yesterday" name={t.yesterday} fill={DATE_CATEGORY_COLORS['Yesterday']} stackId="deliveryDate" />
+                            <Bar key="older-delivery" dataKey="Older" name={t.older} fill={DATE_CATEGORY_COLORS['Older']} stackId="deliveryDate" />
+                            <Bar key="future-delivery" dataKey="Future" name={t.future} fill={DATE_CATEGORY_COLORS['Future']} stackId="deliveryDate" />
                           </BarChart>
                         )}
                       </ResponsiveContainer>
@@ -2684,16 +3595,16 @@ export default function ZakazkyDashboard() {
             </>
           )}
 
-          {activeTab === 1 && ( // Delayed Orders Tab Content
+          {activeTab === 1 && (
             <Card>
               <CardContent>
                 <h2 className="text-2xl font-semibold mb-4 flex items-center gap-2 text-red-400">
                   <ClipboardList className="w-6 h-6" /> {t.delayed}
                   <button
-                    onClick={exportDelayedOrdersCSV} // Changed to CSV export
+                    onClick={exportDelayedOrdersXLSX} // Changed to XLSX export
                     className="ml-auto flex items-center gap-2 bg-purple-600 text-white px-4 py-2 rounded-lg shadow hover:bg-purple-700 transition-colors text-base"
                   >
-                    <FileDown className="w-5 h-5" /> {t.exportToCSV}
+                    <FileDown className="w-5 h-5" /> {t.exportToXLSX} {/* Changed text */}
                   </button>
                 </h2>
                 <p className="text-gray-200 text-lg mb-4">
@@ -2709,54 +3620,63 @@ export default function ZakazkyDashboard() {
                           <th className="py-3 px-4 text-left text-sm font-semibold text-gray-100">{t.deliveryType}</th>
                           <th className="py-3 px-4 text-left text-sm font-semibold text-gray-100">{t.loadingDate}</th>
                           <th className="py-3 px-4 text-left text-sm font-semibold text-gray-100">{t.delay}</th>
-                          <th className="py-3 px-4 text-left text-sm font-semibold text-gray-100">{t.billOfLading}</th> {/* Nový sloupec */}
+                          <th className="py-3 px-4 text-left text-sm font-semibold text-gray-100">{t.billOfLading}</th>
                           <th className="py-3 px-4 text-left text-sm font-semibold text-gray-100">{t.note}</th>
-                          {/* Akce column removed as row click handles details */}
                         </tr>
                       </thead>
                       <tbody>
-                        {/* Zobrazit pouze 10 řádků nebo všechny, pokud jsou rozbalené */}
-                        {(showAllDelayed ? summary.delayedOrdersList : summary.delayedOrdersList.slice(0, 10)).map((order, index) => (
-                          <tr 
-                            key={order.delivery || index} 
-                            className={`border-t border-gray-600 cursor-pointer ${index % 2 === 0 ? "bg-gray-750" : "bg-gray-700"} hover:bg-gray-600 transition-colors`}
-                            onClick={() => setSelectedOrderDetails({ // Open OrderDetailsModal on row click
+                        {(showAllDelayed ? summary.delayedOrdersList : summary.delayedOrdersList.slice(0, 10)).map((order, index) => {
+                          let formattedLoadingDate = 'N/A';
+                          if (order.loadingDate) { // order.loadingDate is already ISO string
+                            try {
+                              const parsedDate = parseISO(order.loadingDate);
+                              if (!isNaN(parsedDate.getTime())) {
+                                formattedLoadingDate = format(parsedDate, 'dd/MM/yyyy');
+                              }
+                            } catch (e) {
+                              console.error("Error parsing loading date in Delayed Orders table:", e, order.loadingDate);
+                            }
+                          }
+                          return (
+                            <tr
+                              key={order.delivery || index}
+                              className={`border-t border-gray-600 cursor-pointer ${index % 2 === 0 ? "bg-gray-750" : "bg-gray-700"} hover:bg-gray-600 transition-colors`}
+                              onClick={() => setSelectedOrderDetails({
                                 "Delivery No": order.delivery,
                                 "Status": order.status,
                                 "del.type": order.delType,
-                                "Loading Date": order.loadingDate,
+                                "Loading Date": order.loadingDate, // This is already ISO string
                                 "Note": order.note,
                                 "Forwarding agent name": order["Forwarding agent name"],
                                 "Name of ship-to party": order["Name of ship-to party"],
                                 "Total Weight": order["Total Weight"],
-                                "Bill of lading": order["Bill of lading"], // Přidáno "Bill of lading"
-                                // No processingTime for delayed list directly
-                            })}
-                          >
-                            <td className="py-3 px-4 text-gray-200">{order.delivery}</td>
-                            <td className="py-3 px-4 text-gray-200">{order.status}</td>
-                            <td className="py-3 px-4 text-gray-200">{order.delType}</td>
-                            <td className="py-3 px-4 text-gray-200">{order.loadingDate}</td>
-                            <td className={`py-3 px-4 font-semibold ${getDelayColorClass(order.delayDays)}`}>{order.delayDays}</td>
-                            <td className="py-3 px-4 text-gray-200">{order["Bill of lading"] || 'N/A'}</td> {/* Zobrazení "Bill of lading" */}
-                            <td className="py-3 px-4">
-                              <input
-                                type="text"
-                                value={order.note}
-                                onChange={(e) => {
-                                  // Update local state immediately for responsiveness
-                                  const updatedDelayedList = [...summary.delayedOrdersList];
-                                  updatedDelayedList[index].note = e.target.value;
-                                  setSummary({ ...summary, delayedOrdersList: updatedDelayedList });
-                                }}
-                                onBlur={(e) => handleSaveNote(order.delivery, e.target.value)} // Save on blur
-                                className="w-full p-1 rounded-md bg-gray-600 border border-gray-500 text-gray-100 text-sm focus:ring-blue-500 focus:border-blue-500"
-                                placeholder={t.note}
-                                onClick={(e) => e.stopPropagation()} // Prevent row click when editing note
-                              />
-                            </td>
-                          </tr>
-                        ))}
+                                "Bill of lading": order["Bill of lading"],
+                              })}
+                            >
+                              <td className="py-3 px-4 text-gray-200">{order.delivery}</td>
+                              <td className="py-3 px-4 text-gray-200">{order.status}</td>
+                              <td className="py-3 px-4 text-gray-200">{order.delType}</td>
+                              <td className="py-3 px-4 text-gray-200">{formattedLoadingDate}</td>
+                              <td className={`py-3 px-4 font-semibold ${getDelayColorClass(order.delayDays)}`}>{order.delayDays}</td>
+                              <td className="py-3 px-4 text-gray-200">{order["Bill of lading"] || 'N/A'}</td>
+                              <td className="py-3 px-4">
+                                <input
+                                  type="text"
+                                  value={order.note}
+                                  onChange={(e) => {
+                                    const updatedDelayedList = [...summary.delayedOrdersList];
+                                    updatedDelayedList[index].note = e.target.value;
+                                    setSummary({ ...summary, delayedOrdersList: updatedDelayedList });
+                                  }}
+                                  onBlur={(e) => handleSaveNote(order.delivery, e.target.value)}
+                                  className="w-full p-1 rounded-md bg-gray-600 border border-gray-500 text-gray-100 text-sm focus:ring-blue-500 focus:border-blue-500"
+                                  placeholder={t.note}
+                                  onClick={(e) => e.stopPropagation()}
+                                />
+                              </td>
+                            </tr>
+                          );
+                        })}
                       </tbody>
                     </table>
                   ) : (
@@ -2777,7 +3697,7 @@ export default function ZakazkyDashboard() {
             </Card>
           )}
 
-          {activeTab === 2 && ( // Import Comparison Tab Content
+          {activeTab === 2 && (
             <Card>
               <CardContent>
                 <h2 className="text-2xl font-semibold mb-4 flex items-center gap-2 text-yellow-400">
@@ -2837,13 +3757,13 @@ export default function ZakazkyDashboard() {
                           if (count > 0) {
                             let displayKey = key;
                             if (key.startsWith('new_order_')) {
-                                displayKey = `${t.new_order} ${key.split('_')[2]})`;
+                              displayKey = `${t.new_order} ${key.split('_')[2]})`;
                             } else if (key.startsWith('removed_order_')) {
-                                displayKey = `${t.removed_order} ${key.split('_')[2]})`;
+                              displayKey = `${t.removed_order} ${key.split('_')[2]})`;
                             } else if (STATUS_TRANSITIONS[key]) {
-                                displayKey = t[STATUS_TRANSITIONS[key]];
+                              displayKey = t[STATUS_TRANSITIONS[key]];
                             } else {
-                                displayKey = key.replace(/_/g, ' '); // Fallback for unexpected transitions
+                              displayKey = key.replace(/_/g, ' ');
                             }
                             return (
                               <li key={key} className="text-gray-200">
@@ -2864,23 +3784,27 @@ export default function ZakazkyDashboard() {
             </Card>
           )}
 
-          {activeTab === 3 && ( // New Order Search Tab Content
+          {activeTab === 3 && (
             <Card>
               <CardContent>
                 <h2 className="text-2xl font-semibold mb-4 flex items-center gap-2 text-blue-400">
                   <Search className="w-6 h-6" /> {t.orderSearchTab}
+                  <button
+                    onClick={exportSearchResultsToXLSX}
+                    className="ml-auto flex items-center gap-2 bg-purple-600 text-white px-4 py-2 rounded-lg shadow hover:bg-purple-700 transition-colors text-base"
+                  >
+                    <FileDown className="w-5 h-5" /> {t.exportToXLSX}
+                  </button>
                 </h2>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
                   <div>
                     <label htmlFor="search-delivery-no" className="block text-sm font-medium text-gray-400 mb-1">{t.deliveryNo}:</label>
-                    <input
-                      type="text"
+                    <textarea
                       id="search-delivery-no"
                       value={searchDeliveryNo}
                       onChange={(e) => setSearchDeliveryNo(e.target.value)}
-                      onKeyDown={(e) => { if (e.key === 'Enter') handleSearchOrders(); }}
-                      className="w-full p-2 rounded-md bg-gray-700 border border-gray-600 text-gray-100 focus:ring-blue-500 focus:border-blue-500"
-                      placeholder={t.enterDeliveryNo}
+                      className="w-full p-2 rounded-md bg-gray-700 border border-gray-600 text-gray-100 focus:ring-blue-500 focus:border-blue-500 h-24 resize-y"
+                      placeholder={t.bulkSearch}
                     />
                   </div>
                   <div>
@@ -2935,7 +3859,7 @@ export default function ZakazkyDashboard() {
                 {searchOrdersResult.length > 0 ? (
                   <div className="mt-8">
                     <h3 className="text-xl font-semibold mb-4 text-white">{t.orderList}</h3>
-                    <OrderListTable orders={searchOrdersResult} onSelectOrder={setSelectedOrderDetails} />
+                    <OrderListTable orders={searchOrdersResult} onSelectOrder={setSelectedOrderDetails} t={t} />
                   </div>
                 ) : (
                   searchDeliveryNo || searchLoadingDate || searchStatus !== 'all' || searchShipToPartyName !== 'all' ? (
@@ -2944,6 +3868,106 @@ export default function ZakazkyDashboard() {
                 )}
               </CardContent>
             </Card>
+          )}
+
+          {activeTab === 4 && (
+            <Card>
+              <CardContent>
+                <h2 className="text-2xl font-semibold mb-4 flex items-center gap-2">
+                  <ClipboardList className="w-6 h-6 text-green-400" /> {t.dailySummary}
+                  <div className="ml-auto">
+                    <label htmlFor="daily-summary-date-select" className="sr-only">{t.selectDate}</label>
+                    <select
+                      id="daily-summary-date-select"
+                      value={selectedDailySummaryDate}
+                      onChange={(e) => setSelectedDailySummaryDate(e.target.value)}
+                      className="p-2 rounded-md bg-gray-700 border border-gray-600 text-gray-100 focus:ring-blue-500 focus:border-blue-500"
+                    >
+                      {availableDatesForSummary.length > 0 ? (
+                        availableDatesForSummary.map(date => (
+                          <option key={date} value={date}>
+                            {format(new Date(date), 'dd/MM/yyyy')}
+                          </option>
+                        ))
+                      ) : (
+                        <option value="">{t.noDataAvailable}</option>
+                      )}
+                    </select>
+                  </div>
+                </h2>
+                {selectedDailySummaryDate && summary?.dailySummaries ? (
+                  (() => {
+                    const currentDayStats = summary.dailySummaries.find(d => d.date === selectedDailySummaryDate);
+                    return currentDayStats ? (
+                      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7 gap-6">
+                        <Card>
+                          <CardContent>
+                            <p className="text-gray-400">{t.total}</p>
+                            <p className="text-3xl font-bold text-blue-400">{currentDayStats.total}</p>
+                          </CardContent>
+                        </Card>
+                        <Card>
+                          <CardContent>
+                            <p className="text-gray-400">{t.done}</p>
+                            <p className="text-3xl font-bold text-green-400">{currentDayStats.done}</p>
+                          </CardContent>
+                        </Card>
+                        <Card>
+                          <CardContent>
+                            <p className="text-gray-400">{t.remaining}</p>
+                            <p className="text-3xl font-bold text-yellow-400">{currentDayStats.remaining}</p>
+                          </CardContent>
+                        </Card>
+                        <Card>
+                          <CardContent>
+                            <p className="text-gray-400">{t.inProgress}</p>
+                            <p className="text-3xl font-bold text-orange-400">{currentDayStats.inProgress}</p>
+                          </CardContent>
+                        </Card>
+                        <Card>
+                          <CardContent>
+                            <p className="text-gray-400">{t.newOrders}</p>
+                            <p className="text-3xl font-bold text-purple-400">{currentDayStats.newOrders}</p>
+                          </CardContent>
+                        </Card>
+                        <Card>
+                          <CardContent>
+                            <p className="text-gray-400">{t.pallets}</p>
+                            <p className="text-3xl font-bold text-pink-400">{currentDayStats.pallets}</p>
+                          </CardContent>
+                        </Card>
+                        <Card>
+                          <CardContent>
+                            <p className="text-gray-400">{t.carton}</p>
+                            <p className="text-3xl font-bold text-cyan-400">{currentDayStats.cartons}</p>
+                          </CardContent>
+                        </Card>
+                      </div>
+                    ) : (
+                      <div className="flex items-center justify-center h-40 bg-gray-700 text-gray-400 rounded-xl">
+                        <p className="text-lg">{t.noDataAvailable} pro vybrané datum.</p>
+                      </div>
+                    );
+                  })()
+                ) : (
+                  <div className="flex items-center justify-center h-40 bg-gray-700 text-gray-400 rounded-xl">
+                    <p className="text-lg">{t.noDataAvailable}</p>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          )}
+
+          {activeTab === 5 && (
+            <TicketsTab t={t} currentUser={currentUser} db={firestoreDb} allUsers={allUsers} appId={currentAppId} />
+          )}
+
+          {activeTab === 6 && (
+            <ProfileSettingsTab t={t} currentUser={currentUser} currentUserProfile={currentUserProfile} updateUserProfile={updateUserProfile} db={firestoreDb} appId={currentAppId} />
+          )}
+
+          {activeTab === 7 && (
+            <ChatTab t={t} currentUser={currentUser} currentUserProfile={currentUserProfile} db={firestoreDb} appId={currentAppId} />
           )}
         </div>
       )}
