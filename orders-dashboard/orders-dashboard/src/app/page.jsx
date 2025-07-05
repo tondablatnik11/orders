@@ -61,6 +61,9 @@ import {
   User, // Ikona pro profil
   MessageSquare, // Ikona pro chat
   Save, // Ikona pro uložení
+  Bell, // Ikona pro notifikace
+  Paperclip, // Ikona pro přílohy
+  Ship, // Ikona pro avizované nakládky
 } from "lucide-react";
 // Import Supabase Client
 import { createClient } from '@supabase/supabase-js';
@@ -87,6 +90,9 @@ import {
   getDoc,
   setDoc,
   deleteDoc,
+  where,
+  limit,
+  serverTimestamp,
 } from 'firebase/firestore';
 
 // Supabase Configuration - For Vercel deployment, these should ideally also be environment variables.
@@ -316,6 +322,20 @@ const translations = {
     typeMessage: "Napište svou zprávu...",
     adminStatus: "Administrátor",
     notAdminStatus: "Uživatel",
+    announcedLoadingsTab: "Avizované nakládky",
+    addLoading: "Přidat avizovanou nakládku",
+    carrierName: "Jméno dopravce",
+    orderNumbers: "Čísla zakázek (oddělená čárkou)",
+    notes: "Poznámky",
+    saveLoading: "Uložit nakládku",
+    loadingAddedSuccess: "Nakládka úspěšně přidána!",
+    loadingError: "Chyba při přidávání nakládky:",
+    loadingDetails: "Detaily nakládky",
+    notifications: "Upozornění",
+    messages: "Zprávy",
+    noNotifications: "Žádná nová upozornění.",
+    attachment: "Příloha",
+    addAttachment: "Přidat přílohu",
   },
   en: {
     title: "Order Overview",
@@ -474,6 +494,20 @@ const translations = {
     typeMessage: "Type your message...",
     adminStatus: "Administrator",
     notAdminStatus: "User",
+    announcedLoadingsTab: "Announced Loadings",
+    addLoading: "Add Announced Loading",
+    carrierName: "Carrier Name",
+    orderNumbers: "Order Numbers (comma separated)",
+    notes: "Notes",
+    saveLoading: "Save Loading",
+    loadingAddedSuccess: "Loading added successfully!",
+    loadingError: "Error adding loading:",
+    loadingDetails: "Loading Details",
+    notifications: "Notifications",
+    messages: "Messages",
+    noNotifications: "No new notifications.",
+    attachment: "Attachment",
+    addAttachment: "Add Attachment",
   },
   de: {
     title: "Auftragsübersicht",
@@ -632,6 +666,20 @@ const translations = {
     typeMessage: "Geben Sie Ihre Nachricht ein...",
     adminStatus: "Administrator",
     notAdminStatus: "Benutzer",
+    announcedLoadingsTab: "Avisierte Verladungen",
+    addLoading: "Avisierte Verladung hinzufügen",
+    carrierName: "Spediteur Name",
+    orderNumbers: "Auftragsnummern (durch Komma getrennt)",
+    notes: "Notizen",
+    saveLoading: "Verladung speichern",
+    loadingAddedSuccess: "Verladung erfolgreich hinzugefügt!",
+    loadingError: "Fehler beim Hinzufügen der Verladung:",
+    loadingDetails: "Verladungsdetails",
+    notifications: "Benachrichtigungen",
+    messages: "Nachrichten",
+    noNotifications: "Keine neuen Benachrichtigungen.",
+    attachment: "Anhang",
+    addAttachment: "Anhang hinzufügen",
   },
 };
 
@@ -810,204 +858,288 @@ const OrderListTable = ({ orders, onSelectOrder, t }) => (
   </div>
 );
 
-// Komponenta pro ticketovací systém
-const TicketsTab = ({ t, currentUser, allUsers, db, appId }) => { // Pass db and appId as props
-  const [tickets, setTickets] = useState([]);
-  const [newTicketTitle, setNewTicketTitle] = useState('');
-  const [newTicketDescription, setNewTicketDescription] = useState('');
-  const [newTicketAssignee, setNewTicketAssignee] = useState('');
-  const [ticketMessage, setTicketMessage] = useState('');
-  const [ticketMessageType, setTicketMessageType] = useState(''); // 'success' or 'error'
+// Komponenta pro JIRA-like tickety s přílohami
+const TicketsTab = ({ t, currentUser, allUsers, db, appId }) => {
+    const [tickets, setTickets] = useState([]);
+    const [newTicketTitle, setNewTicketTitle] = useState('');
+    const [newTicketDescription, setNewTicketDescription] = useState('');
+    const [newTicketAssignee, setNewTicketAssignee] = useState('');
+    const [ticketMessage, setTicketMessage] = useState('');
+    const [ticketMessageType, setTicketMessageType] = useState('');
+    const [attachment, setAttachment] = useState(null);
+    const fileInputRef = useRef(null);
+
+    useEffect(() => {
+        if (!db || !appId) return;
+        const ticketsColRef = collection(db, `artifacts/${appId}/public/data/tickets`);
+        const q = query(ticketsColRef, orderBy('createdAt', 'desc'));
+        const unsubscribe = onSnapshot(q, (snapshot) => {
+            const fetchedTickets = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+            setTickets(fetchedTickets);
+        }, (error) => {
+            console.error("Error fetching tickets:", error);
+            setTicketMessage(`${t.ticketError} ${error.message}`);
+            setTicketMessageType('error');
+        });
+        return () => unsubscribe();
+    }, [db, appId, t]);
+
+    const handleFileChange = (e) => {
+        if (e.target.files && e.target.files[0]) {
+            setAttachment(e.target.files[0]);
+        }
+    };
+
+    const handleCreateTicket = async (e) => {
+        e.preventDefault();
+        if (!db || !appId || !newTicketTitle || !newTicketDescription || !newTicketAssignee || !currentUser) {
+            setTicketMessage(`${t.ticketError} Vyplňte všechna pole.`);
+            setTicketMessageType('error');
+            return;
+        }
+
+        let attachmentUrl = null;
+        let attachmentName = null;
+        if (attachment) {
+            const filePath = `${currentUser.uid}/${Date.now()}_${attachment.name}`;
+            const { data, error } = await supabaseClient.storage
+                .from('ticket-attachments')
+                .upload(filePath, attachment);
+
+            if (error) {
+                setTicketMessage(`${t.ticketError} ${error.message}`);
+                setTicketMessageType('error');
+                return;
+            }
+            const { data: { publicUrl } } = supabaseClient.storage.from('ticket-attachments').getPublicUrl(filePath);
+            attachmentUrl = publicUrl;
+            attachmentName = attachment.name;
+        }
+
+        try {
+            await addDoc(collection(db, `artifacts/${appId}/public/data/tickets`), {
+                title: newTicketTitle,
+                description: newTicketDescription,
+                assignedTo: newTicketAssignee,
+                status: 'Open',
+                createdBy: currentUser.uid,
+                createdByName: currentUser.displayName || currentUser.email,
+                createdAt: new Date().toISOString(),
+                attachmentUrl,
+                attachmentName,
+            });
+            setNewTicketTitle('');
+            setNewTicketDescription('');
+            setNewTicketAssignee('');
+            setAttachment(null);
+            if (fileInputRef.current) fileInputRef.current.value = "";
+            setTicketMessage(t.ticketCreatedSuccess);
+            setTicketMessageType('success');
+        } catch (error) {
+            console.error("Error creating ticket:", error);
+            setTicketMessage(`${t.ticketError} ${error.message}`);
+            setTicketMessageType('error');
+        }
+    };
+
+    const handleMarkAsCompleted = async (ticketId) => {
+        if (!db || !appId) return;
+        try {
+            const ticketRef = doc(db, `artifacts/${appId}/public/data/tickets`, ticketId);
+            await updateDoc(ticketRef, { status: 'Completed', completedAt: new Date().toISOString() });
+            setTicketMessage(t.ticketUpdateSuccess);
+            setTicketMessageType('success');
+        } catch (error) {
+            console.error("Error updating ticket status:", error);
+            setTicketMessage(`${t.ticketError} ${error.message}`);
+            setTicketMessageType('error');
+        }
+    };
+
+    const exportTicketsToXLSX = () => {
+        if (typeof window.XLSX === 'undefined') {
+            console.error("XLSX library not loaded.");
+            return;
+        }
+        const dataToExport = tickets.map(ticket => ({
+            [t.ticketTitle]: ticket.title,
+            [t.ticketDescription]: ticket.description,
+            [t.assignedTo]: allUsers.find(u => u.uid === ticket.assignedTo)?.displayName || ticket.assignedTo,
+            [t.statusTicket]: ticket.status,
+            [t.createdBy]: ticket.createdByName,
+            [t.createdAt]: format(parseISO(ticket.createdAt), 'dd/MM/yyyy HH:mm'),
+            [t.attachment]: ticket.attachmentName || 'N/A'
+        }));
+        const worksheet = window.XLSX.utils.json_to_sheet(dataToExport);
+        const workbook = window.XLSX.utils.book_new();
+        window.XLSX.utils.book_append_sheet(workbook, worksheet, "Tickets");
+        window.XLSX.writeFile(workbook, "tickets_export.xlsx");
+    };
+
+    return (
+        <Card>
+            <CardContent>
+                <div className="flex justify-between items-center mb-4">
+                    <h2 className="text-2xl font-semibold flex items-center gap-2 text-purple-400">
+                        <Ticket className="w-6 h-6" /> {t.ticketsTab}
+                    </h2>
+                    <button onClick={exportTicketsToXLSX} className="flex items-center gap-2 bg-green-600 text-white px-4 py-2 rounded-lg shadow hover:bg-green-700">
+                        <FileDown className="w-5 h-5" /> {t.exportToXLSX}
+                    </button>
+                </div>
+
+                {ticketMessage && <div className={`p-3 mb-4 rounded-md text-sm ${ticketMessageType === 'success' ? 'bg-green-800 text-green-100' : 'bg-red-800 text-red-100'}`}>{ticketMessage}</div>}
+
+                <form onSubmit={handleCreateTicket} className="space-y-4 mb-8 p-4 border border-gray-700 rounded-lg bg-gray-750">
+                    <h3 className="text-xl font-semibold text-blue-300 mb-3">{t.createTicket}</h3>
+                    <div>
+                        <label htmlFor="ticket-title" className="block text-sm font-medium text-gray-300 mb-1">{t.ticketTitle}:</label>
+                        <input type="text" id="ticket-title" value={newTicketTitle} onChange={(e) => setNewTicketTitle(e.target.value)} className="w-full p-2 rounded-md bg-gray-600 border border-gray-500" />
+                    </div>
+                    <div>
+                        <label htmlFor="ticket-description" className="block text-sm font-medium text-gray-300 mb-1">{t.ticketDescription}:</label>
+                        <textarea id="ticket-description" value={newTicketDescription} onChange={(e) => setNewTicketDescription(e.target.value)} className="w-full p-2 rounded-md bg-gray-600 border border-gray-500 h-24" />
+                    </div>
+                    <div>
+                        <label htmlFor="ticket-assignee" className="block text-sm font-medium text-gray-300 mb-1">{t.assignTo}:</label>
+                        <select id="ticket-assignee" value={newTicketAssignee} onChange={(e) => setNewTicketAssignee(e.target.value)} className="w-full p-2 rounded-md bg-gray-600 border border-gray-500">
+                            <option value="">{t.selectImport}</option>
+                            {allUsers.map(user => <option key={user.uid} value={user.uid}>{user.displayName || user.email}</option>)}
+                        </select>
+                    </div>
+                    <div>
+                        <label htmlFor="ticket-attachment" className="block text-sm font-medium text-gray-300 mb-1">{t.addAttachment}:</label>
+                        <input type="file" id="ticket-attachment" ref={fileInputRef} onChange={handleFileChange} className="w-full text-sm text-gray-400 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100" />
+                    </div>
+                    <button type="submit" className="w-full bg-blue-600 text-white px-4 py-2 rounded-lg shadow hover:bg-blue-700 flex items-center justify-center gap-2">
+                        <Send className="w-5 h-5" /> {t.createTicket}
+                    </button>
+                </form>
+
+                <div className="overflow-x-auto">
+                    {tickets.length > 0 ? (
+                        <table className="min-w-full bg-gray-700 rounded-lg">
+                            <thead className="bg-gray-600">
+                                <tr>
+                                    <th className="py-3 px-4 text-left text-sm font-semibold">{t.ticketTitle}</th>
+                                    <th className="py-3 px-4 text-left text-sm font-semibold">{t.assignedTo}</th>
+                                    <th className="py-3 px-4 text-left text-sm font-semibold">{t.statusTicket}</th>
+                                    <th className="py-3 px-4 text-left text-sm font-semibold">{t.attachment}</th>
+                                    <th className="py-3 px-4 text-left text-sm font-semibold">Akce</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {tickets.map((ticket, index) => (
+                                    <tr key={ticket.id} className={`border-t border-gray-600 ${index % 2 === 0 ? "bg-gray-750" : "bg-gray-700"}`}>
+                                        <td className="py-3 px-4">{ticket.title}</td>
+                                        <td className="py-3 px-4">{allUsers.find(u => u.uid === ticket.assignedTo)?.displayName || 'N/A'}</td>
+                                        <td className="py-3 px-4"><span className={`px-2 py-1 rounded-full text-xs font-semibold ${ticket.status === 'Open' ? 'bg-red-600 text-white' : 'bg-green-600 text-white'}`}>{ticket.status === 'Open' ? t.open : t.completed}</span></td>
+                                        <td className="py-3 px-4">
+                                            {ticket.attachmentUrl && <a href={ticket.attachmentUrl} target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:underline"><Paperclip className="w-4 h-4 inline-block mr-1"/>{ticket.attachmentName}</a>}
+                                        </td>
+                                        <td className="py-3 px-4">
+                                            {ticket.status === 'Open' && currentUser && ticket.assignedTo === currentUser.uid && (
+                                                <button onClick={() => handleMarkAsCompleted(ticket.id)} className="bg-green-600 text-white p-2 rounded-md text-sm hover:bg-green-700 flex items-center"><CheckCircle className="w-4 h-4"/></button>
+                                            )}
+                                        </td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    ) : (
+                         <p className="text-center text-gray-400">{t.noDataAvailable}</p>
+                    )}
+                </div>
+            </CardContent>
+        </Card>
+    );
+};
+
+// Komponenta pro avizované nakládky
+const AnnouncedLoadingsTab = ({ t, allOrdersData, onSelectOrder, db, appId, currentUser }) => {
+  const [loadings, setLoadings] = useState([]);
+  const [newLoading, setNewLoading] = useState({ loadingDate: '', carrierName: '', orderNumbers: '', notes: '' });
+  const [selectedLoadingDetails, setSelectedLoadingDetails] = useState(null);
 
   useEffect(() => {
-    if (!db || !appId) {
-      console.warn("Firestore or App ID not available for tickets tab.");
-      return;
-    }
-
-    const ticketsColRef = collection(db, `artifacts/${appId}/public/data/tickets`);
-    const q = query(ticketsColRef, orderBy('createdAt', 'desc'));
-
+    if (!db || !appId) return;
+    const loadingsColRef = collection(db, `artifacts/${appId}/public/data/announced_loadings`);
+    const q = query(loadingsColRef, orderBy('created_at', 'desc'));
     const unsubscribe = onSnapshot(q, (snapshot) => {
-      const fetchedTickets = snapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data(),
-      }));
-      setTickets(fetchedTickets);
-    }, (error) => {
-      console.error("Error fetching tickets:", error);
-      setTicketMessage(`${t.ticketError} ${error.message}`);
-      setTicketMessageType('error');
+      const fetchedLoadings = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      setLoadings(fetchedLoadings);
     });
-
     return () => unsubscribe();
-  }, [db, appId, t]); // Add db and appId to dependencies
+  }, [db, appId]);
 
-  const handleCreateTicket = async (e) => {
+  const handleInputChange = (e) => {
+    const { name, value } = e.target;
+    setNewLoading(prev => ({ ...prev, [name]: value }));
+  };
+
+  const handleSaveLoading = async (e) => {
     e.preventDefault();
-    if (!db || !appId || !newTicketTitle || !newTicketDescription || !newTicketAssignee || !currentUser) {
-      setTicketMessage(`${t.ticketError} Vyplňte všechna pole a ujistěte se, že jste přihlášeni.`);
-      setTicketMessageType('error');
-      return;
-    }
-
+    if (!db || !appId || !currentUser || !newLoading.loadingDate || !newLoading.carrierName) return;
     try {
-      await addDoc(collection(db, `artifacts/${appId}/public/data/tickets`), {
-        title: newTicketTitle,
-        description: newTicketDescription,
-        assignedTo: newTicketAssignee,
-        status: 'Open',
-        createdBy: currentUser.uid,
-        createdByName: currentUser.email, // Store name for display
-        createdAt: new Date().toISOString(),
+      await addDoc(collection(db, `artifacts/${appId}/public/data/announced_loadings`), {
+        ...newLoading,
+        order_numbers: newLoading.orderNumbers.split(',').map(n => n.trim()).filter(Boolean),
+        user_id: currentUser.uid,
+        created_at: new Date().toISOString(),
       });
-      setNewTicketTitle('');
-      setNewTicketDescription('');
-      setNewTicketAssignee('');
-      setTicketMessage(t.ticketCreatedSuccess);
-      setTicketMessageType('success');
+      setNewLoading({ loadingDate: '', carrierName: '', orderNumbers: '', notes: '' });
     } catch (error) {
-      console.error("Error creating ticket:", error);
-      setTicketMessage(`${t.ticketError} ${error.message}`);
-      setTicketMessageType('error');
+      console.error("Error saving loading:", error);
     }
   };
 
-  const handleMarkAsCompleted = async (ticketId) => {
-    if (!db || !appId) {
-      setTicketMessage(`${t.ticketError} Firestore není inicializován.`);
-      setTicketMessageType('error');
-      return;
-    }
-    try {
-      const ticketRef = doc(db, `artifacts/${appId}/public/data/tickets`, ticketId);
-      await updateDoc(ticketRef, {
-        status: 'Completed',
-        completedAt: new Date().toISOString(),
-      });
-      setTicketMessage(t.ticketUpdateSuccess);
-      setTicketMessageType('success');
-    } catch (error) {
-      console.error("Error updating ticket status:", error);
-      setTicketMessage(`${t.ticketError} ${error.message}`);
-      setTicketMessageType('error');
-    }
+  const handleSelectLoading = (loading) => {
+    const orders = allOrdersData.filter(order => loading.order_numbers.includes(String(order["Delivery No"])));
+    setSelectedLoadingDetails({ ...loading, orders });
   };
 
   return (
     <Card>
       <CardContent>
-        <h2 className="text-2xl font-semibold mb-4 flex items-center gap-2 text-purple-400">
-          <Ticket className="w-6 h-6" /> {t.ticketsTab}
+        <h2 className="text-2xl font-semibold mb-4 flex items-center gap-2 text-cyan-400">
+          <Ship className="w-6 h-6" /> {t.announcedLoadingsTab}
         </h2>
-
-        {ticketMessage && (
-          <div className={`p-3 mb-4 rounded-md text-sm ${ticketMessageType === 'success' ? 'bg-green-800 text-green-100' : 'bg-red-800 text-red-100'}`}>
-            {ticketMessage}
-          </div>
-        )}
-
-        <form onSubmit={handleCreateTicket} className="space-y-4 mb-8 p-4 border border-gray-700 rounded-lg bg-gray-750">
-          <h3 className="text-xl font-semibold text-blue-300 mb-3">{t.createTicket}</h3>
+        <form onSubmit={handleSaveLoading} className="space-y-4 mb-8 p-4 border border-gray-700 rounded-lg bg-gray-750">
+          <h3 className="text-xl font-semibold text-blue-300 mb-3">{t.addLoading}</h3>
           <div>
-            <label htmlFor="ticket-title" className="block text-sm font-medium text-gray-300 mb-1">{t.ticketTitle}:</label>
-            <input
-              type="text"
-              id="ticket-title"
-              value={newTicketTitle}
-              onChange={(e) => setNewTicketTitle(e.target.value)}
-              className="w-full p-2 rounded-md bg-gray-600 border border-gray-500 text-gray-100 focus:ring-blue-500 focus:border-blue-500"
-              placeholder={t.ticketTitle}
-            />
+            <label htmlFor="loadingDate" className="block text-sm font-medium text-gray-300 mb-1">{t.loadingDate}:</label>
+            <input type="date" name="loadingDate" value={newLoading.loadingDate} onChange={handleInputChange} className="w-full p-2 rounded-md bg-gray-600 border-gray-500" required />
           </div>
           <div>
-            <label htmlFor="ticket-description" className="block text-sm font-medium text-gray-300 mb-1">{t.ticketDescription}:</label>
-            <textarea
-              id="ticket-description"
-              value={newTicketDescription}
-              onChange={(e) => setNewTicketDescription(e.target.value)}
-              className="w-full p-2 rounded-md bg-gray-600 border border-gray-500 text-gray-100 focus:ring-blue-500 focus:border-blue-500 h-24 resize-y"
-              placeholder={t.ticketDescription}
-            />
+            <label htmlFor="carrierName" className="block text-sm font-medium text-gray-300 mb-1">{t.carrierName}:</label>
+            <input type="text" name="carrierName" value={newLoading.carrierName} onChange={handleInputChange} className="w-full p-2 rounded-md bg-gray-600 border-gray-500" required />
           </div>
           <div>
-            <label htmlFor="ticket-assignee" className="block text-sm font-medium text-gray-300 mb-1">{t.assignTo}:</label>
-            <select
-              id="ticket-assignee"
-              value={newTicketAssignee}
-              onChange={(e) => setNewTicketAssignee(e.target.value)}
-              className="w-full p-2 rounded-md bg-gray-600 border border-gray-500 text-gray-100 focus:ring-blue-500 focus:border-blue-500"
-            >
-              <option value="">{t.selectImport}</option> {/* Reusing selectImport for "Select User" */}
-              {allUsers.length > 0 ? (
-                allUsers.map(user => (
-                  <option key={user.uid} value={user.uid}>
-                    {user.email} ({user.displayName || 'N/A'})
-                  </option>
-                ))
-              ) : (
-                <option value="" disabled>{t.noUsersFound}</option>
-              )}
-            </select>
+            <label htmlFor="orderNumbers" className="block text-sm font-medium text-gray-300 mb-1">{t.orderNumbers}:</label>
+            <input type="text" name="orderNumbers" value={newLoading.orderNumbers} onChange={handleInputChange} className="w-full p-2 rounded-md bg-gray-600 border-gray-500" />
           </div>
-          <button
-            type="submit"
-            className="w-full bg-blue-600 text-white px-4 py-2 rounded-lg shadow hover:bg-blue-700 transition-colors flex items-center justify-center gap-2"
-          >
-            <Send className="w-5 h-5" /> {t.createTicket}
-          </button>
+          <div>
+            <label htmlFor="notes" className="block text-sm font-medium text-gray-300 mb-1">{t.notes}:</label>
+            <textarea name="notes" value={newLoading.notes} onChange={handleInputChange} className="w-full p-2 rounded-md bg-gray-600 border-gray-500 h-20" />
+          </div>
+          <button type="submit" className="w-full bg-blue-600 text-white px-4 py-2 rounded-lg shadow hover:bg-blue-700">{t.saveLoading}</button>
         </form>
 
-        <h3 className="text-xl font-semibold text-white mb-3">Seznam úkolů</h3>
-        <div className="overflow-x-auto">
-          {tickets.length > 0 ? (
-            <table className="min-w-full bg-gray-700 rounded-lg overflow-hidden">
-              <thead className="bg-gray-600">
-                <tr>
-                  <th className="py-3 px-4 text-left text-sm font-semibold text-gray-100">{t.ticketTitle}</th>
-                  <th className="py-3 px-4 text-left text-sm font-semibold text-gray-100">{t.ticketDescription}</th>
-                  <th className="py-3 px-4 text-left text-sm font-semibold text-gray-100">{t.assignedTo}</th>
-                  <th className="py-3 px-4 text-left text-sm font-semibold text-gray-100">{t.statusTicket}</th>
-                  <th className="py-3 px-4 text-left text-sm font-semibold text-gray-100">{t.createdBy}</th>
-                  <th className="py-3 px-4 text-left text-sm font-semibold text-gray-100">{t.createdAt}</th>
-                  <th className="py-3 px-4 text-left text-sm font-semibold text-gray-100">Akce</th>
-                </tr>
-              </thead>
-              <tbody>
-                {tickets.map((ticket, index) => (
-                  <tr key={ticket.id} className={`border-t border-gray-600 ${index % 2 === 0 ? "bg-gray-750" : "bg-gray-700"}`}>
-                    <td className="py-3 px-4 text-gray-200">{ticket.title}</td>
-                    <td className="py-3 px-4 text-gray-200 text-sm">{ticket.description}</td>
-                    <td className="py-3 px-4 text-gray-200">
-                      {allUsers.find(u => u.uid === ticket.assignedTo)?.displayName || ticket.assignedTo}
-                    </td>
-                    <td className="py-3 px-4 text-gray-200">
-                      <span className={`px-2 py-1 rounded-full text-xs font-semibold ${
-                        ticket.status === 'Open' ? 'bg-red-600 text-white' : 'bg-green-600 text-white'
-                      }`}>
-                        {ticket.status === 'Open' ? t.open : t.completed}
-                      </span>
-                    </td>
-                    <td className="py-3 px-4 text-gray-200 text-sm">{allUsers.find(u => u.uid === ticket.createdBy)?.displayName || ticket.createdByName || 'N/A'}</td>
-                    <td className="py-3 px-4 text-gray-200 text-sm">{format(parseISO(ticket.createdAt), 'dd/MM/yyyy HH:mm')}</td>
-                    <td className="py-3 px-4">
-                      {ticket.status === 'Open' && currentUser && ticket.assignedTo === currentUser.uid && (
-                        <button
-                          onClick={() => handleMarkAsCompleted(ticket.id)}
-                          className="bg-green-600 text-white px-3 py-1 rounded-md text-sm hover:bg-green-700 transition-colors flex items-center gap-1"
-                        >
-                          <CheckCircle className="w-4 h-4" /> {t.markAsCompleted}
-                        </button>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          ) : (
-            <p className="text-center text-gray-400">{t.noDataAvailable}</p>
-          )}
+        <div className="space-y-3">
+          {loadings.map((loading) => (
+            <div key={loading.id} className="p-4 border border-gray-600 rounded-lg cursor-pointer hover:bg-gray-700 transition-colors" onClick={() => handleSelectLoading(loading)}>
+              <p><strong>{t.loadingDate}:</strong> {format(parseISO(loading.loadingDate), 'dd/MM/yyyy')}</p>
+              <p><strong>{t.carrierName}:</strong> {loading.carrierName}</p>
+            </div>
+          ))}
         </div>
+        {selectedLoadingDetails && (
+          <Modal title={t.loadingDetails} onClose={() => setSelectedLoadingDetails(null)}>
+            <h3 className="text-lg font-bold mb-2">{selectedLoadingDetails.carrierName} - {format(parseISO(selectedLoadingDetails.loadingDate), 'dd/MM/yyyy')}</h3>
+            <p className="mb-4">{selectedLoadingDetails.notes}</p>
+            <OrderListTable orders={selectedLoadingDetails.orders} onSelectOrder={onSelectOrder} t={t} />
+          </Modal>
+        )}
       </CardContent>
     </Card>
   );
@@ -1171,8 +1303,8 @@ const ChatTab = ({ t, currentUser, currentUserProfile, db, appId }) => {
   };
 
   return (
-    <Card>
-      <CardContent className="flex flex-col h-[70vh]">
+    <Card className="h-full">
+      <CardContent className="flex flex-col h-full">
         <h2 className="text-2xl font-semibold mb-4 flex items-center gap-2 text-green-400">
           <MessageSquare className="w-6 h-6" /> {t.chatTab}
         </h2>
@@ -1225,11 +1357,14 @@ export default function ZakazkyDashboard() {
   // Stavy pro UI
   const [lang, setLang] = useState("cz");
   const [darkMode, setDarkMode] = useState(true);
-  const [activeTab, setActiveTab] = useState(0); // 0: Dashboard, 1: Delayed, 2: Comparison, 3: Search, 4: Daily Summary, 5: Tickets, 6: Profile, 7: Chat
+  const [activeTab, setActiveTab] = useState(0); // 0: Dashboard, 1: Delayed, 2: Search, 3: Daily Summary, 4: Announced, 5: Tickets
   const [filtersCollapsed, setFiltersCollapsed] = useState(true);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [itemToDeleteId, setItemToDeleteId] = useState(null);
   const [showAllDelayed, setShowAllDelayed] = useState(false);
+  const [isChatOpen, setIsChatOpen] = useState(false);
+  const [isProfileOpen, setIsProfileOpen] = useState(false);
+
 
   // Stavy pro data
   const [allOrdersData, setAllOrdersData] = useState([]);
@@ -1244,6 +1379,8 @@ export default function ZakazkyDashboard() {
   const [shiftComparisonData, setShiftComparisonData] = useState([]);
   const [deliveryTypePieData, setDeliveryTypePieData] = useState([]);
   const [deliveryTypeStackedChartData, setDeliveryTypeStackedChartData] = useState([]);
+  const [dailyStatusDistributionData, setDailyStatusDistributionData] = useState([]);
+
 
   // Stavy pro interaktivitu grafů
   const [chartTypeOrdersOverTime, setChartTypeOrdersOverTime] = useState('bar');
@@ -1261,22 +1398,25 @@ export default function ZakazkyDashboard() {
 
   // Stavy pro přihlášení a načítání
   const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [isClient, setIsClient] = useState(false); // Nový stav pro kontrolu, zda běží na klientovi
-  const [isLoadingData, setIsLoadingData] = useState(true); // Default na true, aby se zobrazil loading
+  const [isClient, setIsClient] = useState(false);
+  const [isLoadingData, setIsLoadingData] = useState(true);
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [loginError, setLoginError] = useState("");
-  const [isRegistering, setIsRegistering] = useState(false); // Nový stav pro přepínání mezi login/register
+  const [isRegistering, setIsRegistering] = useState(false);
   const [registerMessage, setRegisterMessage] = useState('');
-  const [currentUser, setCurrentUser] = useState(null); // Firebase User object
-  const [currentUserProfile, setCurrentUserProfile] = useState(null); // User profile from Firestore
-  const [allUsers, setAllUsers] = useState([]); // List of all registered users for ticket assignment
+  const [currentUser, setCurrentUser] = useState(null);
+  const [currentUserProfile, setCurrentUserProfile] = useState(null);
+  const [allUsers, setAllUsers] = useState([]);
+  const [unreadMessages, setUnreadMessages] = useState(0);
+  const [notifications, setNotifications] = useState([]);
+
 
   // Firebase Instances as state
   const [firebaseAuth, setFirebaseAuth] = useState(null);
   const [firestoreDb, setFirestoreDb] = useState(null);
-  const [currentAppId, setCurrentAppId] = useState(null); // App ID from Firebase config
-  const [isFirebaseReady, setIsFirebaseReady] = useState(false); // New state for Firebase readiness
+  const [currentAppId, setCurrentAppId] = useState(null);
+  const [isFirebaseReady, setIsFirebaseReady] = useState(false);
 
   // Stavy pro modální okna
   const [showOrderListModal, setShowOrderListModal] = useState(false);
@@ -1511,6 +1651,7 @@ export default function ZakazkyDashboard() {
         dailySummariesMap.set(formattedDate_YYYYMMDD, {
           date: formattedDate_YYYYMMDD,
           total: 0, done: 0, remaining: 0, inProgress: 0, newOrders: 0, pallets: 0, cartons: 0,
+          statusCounts: {}
         });
       }
       const currentDayStats = dailySummariesMap.get(formattedDate_YYYYMMDD);
@@ -1521,6 +1662,8 @@ export default function ZakazkyDashboard() {
       if (newOrderStatuses.includes(status)) currentDayStats.newOrders += 1;
       if (delType === "P") currentDayStats.pallets += 1;
       if (delType === "K") currentDayStats.cartons += 1;
+      currentDayStats.statusCounts[status] = (currentDayStats.statusCounts[status] || 0) + 1;
+
 
       let dateCategoryName;
       if (formattedDate_YYYYMMDD === format(today, 'yyyy-MM-dd')) {
@@ -1740,6 +1883,19 @@ export default function ZakazkyDashboard() {
       setSelectedDailySummaryDate('');
     }
   }, [allOrdersData, applyFiltersAndProcessData, isAuthenticated, t]);
+
+  // Efekt pro denní souhrn a jeho graf
+  useEffect(() => {
+    if (selectedDailySummaryDate && summary) {
+        const dailyData = summary.dailySummaries.find(d => d.date === selectedDailySummaryDate);
+        if (dailyData && dailyData.statusCounts) {
+            setDailyStatusDistributionData(Object.entries(dailyData.statusCounts).map(([status, count]) => ({ name: `Status ${status}`, value: count })));
+        } else {
+            setDailyStatusDistributionData([]);
+        }
+    }
+  }, [selectedDailySummaryDate, summary]);
+
 
   // Načtení dat z Supabase po autentizaci a když je komponenta na klientovi
   useEffect(() => {
@@ -2648,35 +2804,47 @@ export default function ZakazkyDashboard() {
         darkMode ? "bg-gray-950 text-gray-100" : "bg-white text-gray-900"
       } transition-colors duration-300 font-inter`}
     >
-      <div className="flex justify-between items-center mb-8">
-        <h1 className="text-4xl font-bold">{t.title}</h1>
-        <div className="flex items-center gap-4">
-          <button
-            onClick={() => {
-              setLang(prevLang => {
-                if (prevLang === "cz") return "en";
-                if (prevLang === "en") return "de";
-                return "cz";
-              });
-            }}
-            className="flex items-center gap-1 bg-gray-800 hover:bg-gray-700 px-3 py-1 rounded-lg shadow text-sm"
-          >
-            <Globe className="w-4 h-4" /> {t.langCode}
-          </button>
-          <button
-            onClick={() => setDarkMode(!darkMode)}
-            className="flex items-center gap-1 bg-gray-800 hover:bg-gray-700 px-3 py-1 rounded-lg shadow text-sm"
-          >
-            {darkMode ? <Sun className="w-4 h-4 text-yellow-400" /> : <Moon className="w-4 h-4 text-blue-400" />} {t.switchTheme}
-          </button>
-          <button
-            onClick={handleLogout}
-            className="flex items-center gap-1 bg-red-600 hover:bg-red-700 text-white px-3 py-1 rounded-lg shadow text-sm"
-          >
-            <Lock className="w-5 h-5" /> {t.logout}
-          </button>
-        </div>
-      </div>
+        <header className="flex justify-between items-center mb-8">
+            <h1 className="text-4xl font-bold">{t.title}</h1>
+            <div className="flex items-center gap-6">
+                {currentUserProfile && (
+                    <div className="flex items-center gap-4 text-white">
+                        <div className="relative cursor-pointer" onClick={() => setIsChatOpen(true)}>
+                            <MessageSquare className="w-6 h-6" />
+                            {unreadMessages > 0 && <span className="absolute -top-2 -right-2 bg-red-500 text-white text-xs rounded-full h-5 w-5 flex items-center justify-center">{unreadMessages}</span>}
+                        </div>
+                        <div className="relative">
+                            <Bell className="w-6 h-6" />
+                            {notifications.length > 0 && <span className="absolute -top-2 -right-2 bg-red-500 text-white text-xs rounded-full h-5 w-5 flex items-center justify-center">{notifications.length}</span>}
+                        </div>
+                        <div className="relative cursor-pointer" onClick={() => setIsProfileOpen(true)}>
+                            <span className="font-semibold">{currentUserProfile.displayName}</span>
+                        </div>
+                    </div>
+                )}
+                 <button
+                    onClick={() => {
+                      setLang(prevLang => {
+                        if (prevLang === "cz") return "en";
+                        if (prevLang === "en") return "de";
+                        return "cz";
+                      });
+                    }}
+                    className="flex items-center gap-1 bg-gray-800 hover:bg-gray-700 px-3 py-1 rounded-lg shadow text-sm"
+                  >
+                    <Globe className="w-4 h-4" /> {t.langCode}
+                  </button>
+                  <button
+                    onClick={() => setDarkMode(!darkMode)}
+                    className="flex items-center gap-1 bg-gray-800 hover:bg-gray-700 px-3 py-1 rounded-lg shadow text-sm"
+                  >
+                    {darkMode ? <Sun className="w-4 h-4 text-yellow-400" /> : <Moon className="w-4 h-4 text-blue-400" />} {t.switchTheme}
+                  </button>
+                <button onClick={handleLogout} className="flex items-center gap-1 bg-red-600 hover:bg-red-700 text-white px-3 py-1 rounded-lg shadow text-sm">
+                    <Lock className="w-5 h-5" /> {t.logout}
+                </button>
+            </div>
+        </header>
 
       <div className="flex flex-col md:flex-row justify-center items-center gap-4">
         <label className="cursor-pointer inline-flex items-center gap-2 bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded-lg shadow transition-colors">
@@ -2788,55 +2956,13 @@ export default function ZakazkyDashboard() {
       {summary && (
         <div id="report-section" className="space-y-10">
           {/* Navigace záložek */}
-          <div className="flex space-x-1 rounded-xl bg-gray-800 p-1 mb-8 max-w-6xl mx-auto overflow-x-auto">
-            <button
-              onClick={() => setActiveTab(0)}
-              className={`flex-shrink-0 w-full md:w-auto px-4 py-2.5 text-sm leading-5 font-medium rounded-lg focus:outline-none focus:ring-2 ring-offset-2 ring-offset-gray-700 ring-white ring-opacity-60 ${activeTab === 0 ? 'bg-blue-600 text-white shadow' : 'text-blue-100 hover:bg-white/[0.12] hover:text-white'}`}
-            >
-              {t.dashboardTab}
-            </button>
-            <button
-              onClick={() => setActiveTab(1)}
-              className={`flex-shrink-0 w-full md:w-auto px-4 py-2.5 text-sm leading-5 font-medium rounded-lg focus:outline-none focus:ring-2 ring-offset-2 ring-offset-gray-700 ring-white ring-opacity-60 ${activeTab === 1 ? 'bg-blue-600 text-white shadow' : 'text-blue-100 hover:bg-white/[0.12] hover:text-white'}`}
-            >
-              {t.delayedOrdersTab}
-            </button>
-            <button
-              onClick={() => setActiveTab(2)}
-              className={`flex-shrink-0 w-full md:w-auto px-4 py-2.5 text-sm leading-5 font-medium rounded-lg focus:outline-none focus:ring-2 ring-offset-2 ring-offset-gray-700 ring-white ring-opacity-60 ${activeTab === 2 ? 'bg-blue-600 text-white shadow' : 'text-blue-100 hover:bg-white/[0.12] hover:text-white'}`}
-            >
-              {t.importComparisonTab}
-            </button>
-            <button
-              onClick={() => setActiveTab(3)}
-              className={`flex-shrink-0 w-full md:w-auto px-4 py-2.5 text-sm leading-5 font-medium rounded-lg focus:outline-none focus:ring-2 ring-offset-2 ring-offset-gray-700 ring-white ring-opacity-60 ${activeTab === 3 ? 'bg-blue-600 text-white shadow' : 'text-blue-100 hover:bg-white/[0.12] hover:text-white'}`}
-            >
-              {t.orderSearchTab}
-            </button>
-            <button
-              onClick={() => setActiveTab(4)}
-              className={`flex-shrink-0 w-full md:w-auto px-4 py-2.5 text-sm leading-5 font-medium rounded-lg focus:outline-none focus:ring-2 ring-offset-2 ring-offset-gray-700 ring-white ring-opacity-60 ${activeTab === 4 ? 'bg-blue-600 text-white shadow' : 'text-blue-100 hover:bg-white/[0.12] hover:text-white'}`}
-            >
-              {t.dailySummary}
-            </button>
-            <button
-              onClick={() => setActiveTab(5)}
-              className={`flex-shrink-0 w-full md:w-auto px-4 py-2.5 text-sm leading-5 font-medium rounded-lg focus:outline-none focus:ring-2 ring-offset-2 ring-offset-gray-700 ring-white ring-opacity-60 ${activeTab === 5 ? 'bg-blue-600 text-white shadow' : 'text-blue-100 hover:bg-white/[0.12] hover:text-white'}`}
-            >
-              {t.ticketsTab}
-            </button>
-            <button
-              onClick={() => setActiveTab(6)}
-              className={`flex-shrink-0 w-full md:w-auto px-4 py-2.5 text-sm leading-5 font-medium rounded-lg focus:outline-none focus:ring-2 ring-offset-2 ring-offset-gray-700 ring-white ring-opacity-60 ${activeTab === 6 ? 'bg-blue-600 text-white shadow' : 'text-blue-100 hover:bg-white/[0.12] hover:text-white'}`}
-            >
-              {t.profileTab}
-            </button>
-            <button
-              onClick={() => setActiveTab(7)}
-              className={`flex-shrink-0 w-full md:w-auto px-4 py-2.5 text-sm leading-5 font-medium rounded-lg focus:outline-none focus:ring-2 ring-offset-2 ring-offset-gray-700 ring-white ring-opacity-60 ${activeTab === 7 ? 'bg-blue-600 text-white shadow' : 'text-blue-100 hover:bg-white/[0.12] hover:text-white'}`}
-            >
-              {t.chatTab}
-            </button>
+          <div className="flex space-x-1 rounded-xl bg-gray-800 p-1 mb-8 max-w-full mx-auto overflow-x-auto">
+             <button onClick={() => setActiveTab(0)} className={`flex-shrink-0 w-full md:w-auto px-4 py-2.5 text-sm rounded-lg font-medium focus:outline-none ${activeTab === 0 ? 'bg-blue-600 text-white shadow' : 'text-blue-100 hover:bg-white/[0.12]'}`}>{t.dashboardTab}</button>
+             <button onClick={() => setActiveTab(1)} className={`flex-shrink-0 w-full md:w-auto px-4 py-2.5 text-sm rounded-lg font-medium focus:outline-none ${activeTab === 1 ? 'bg-blue-600 text-white shadow' : 'text-blue-100 hover:bg-white/[0.12]'}`}>{t.delayedOrdersTab}</button>
+             <button onClick={() => setActiveTab(2)} className={`flex-shrink-0 w-full md:w-auto px-4 py-2.5 text-sm rounded-lg font-medium focus:outline-none ${activeTab === 2 ? 'bg-blue-600 text-white shadow' : 'text-blue-100 hover:bg-white/[0.12]'}`}>{t.orderSearchTab}</button>
+             <button onClick={() => setActiveTab(3)} className={`flex-shrink-0 w-full md:w-auto px-4 py-2.5 text-sm rounded-lg font-medium focus:outline-none ${activeTab === 3 ? 'bg-blue-600 text-white shadow' : 'text-blue-100 hover:bg-white/[0.12]'}`}>{t.dailySummary}</button>
+             <button onClick={() => setActiveTab(4)} className={`flex-shrink-0 w-full md:w-auto px-4 py-2.5 text-sm rounded-lg font-medium focus:outline-none ${activeTab === 4 ? 'bg-blue-600 text-white shadow' : 'text-blue-100 hover:bg-white/[0.12]'}`}>{t.announcedLoadingsTab}</button>
+             <button onClick={() => setActiveTab(5)} className={`flex-shrink-0 w-full md:w-auto px-4 py-2.5 text-sm rounded-lg font-medium focus:outline-none ${activeTab === 5 ? 'bg-blue-600 text-white shadow' : 'text-blue-100 hover:bg-white/[0.12]'}`}>{t.ticketsTab}</button>
           </div>
 
           {/* Obsah záložek */}
@@ -3700,93 +3826,6 @@ export default function ZakazkyDashboard() {
           {activeTab === 2 && (
             <Card>
               <CardContent>
-                <h2 className="text-2xl font-semibold mb-4 flex items-center gap-2 text-yellow-400">
-                  <History className="w-6 h-6" /> {t.importComparisonTab}
-                </h2>
-                <p className="text-gray-200 mb-4">{t.selectImportsToCompare}</p>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
-                  <div>
-                    <label htmlFor="compare-import-1" className="block text-sm font-medium text-gray-400 mb-1">{t.import1}:</label>
-                    <select
-                      id="compare-import-1"
-                      value={compareImport1Id}
-                      onChange={(e) => setCompareImport1Id(e.target.value)}
-                      className="w-full p-2 rounded-md bg-gray-700 border border-gray-600 text-gray-100 focus:ring-blue-500 focus:border-blue-500"
-                    >
-                      <option value="">{t.selectImport}</option>
-                      {importHistory.map((imp) => (
-                        <option key={imp.id} value={imp.id}>
-                          {imp.date_label} - {imp.original_name}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                  <div>
-                    <label htmlFor="compare-import-2" className="block text-sm font-medium text-gray-400 mb-1">{t.import2}:</label>
-                    <select
-                      id="compare-import-2"
-                      value={compareImport2Id}
-                      onChange={(e) => setCompareImport2Id(e.target.value)}
-                      className="w-full p-2 rounded-md bg-gray-700 border border-gray-600 text-gray-100 focus:ring-blue-500 focus:border-blue-500"
-                    >
-                      <option value="">{t.selectImport}</option>
-                      {importHistory.map((imp) => (
-                        <option key={imp.id} value={imp.id}>
-                          {imp.date_label} - {imp.original_name}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                </div>
-                <button
-                  onClick={handleCompareImports}
-                  className="w-full bg-blue-600 text-white px-4 py-2 rounded-lg shadow hover:bg-blue-700 transition-colors flex items-center justify-center gap-2"
-                  disabled={!compareImport1Id || !compareImport2Id || compareImport1Id === compareImport2Id}
-                >
-                  <Search className="w-5 h-5" /> {t.compare}
-                </button>
-
-                {comparisonResults && (
-                  <div className="mt-8">
-                    <h3 className="text-xl font-semibold mb-4 text-white">{t.comparisonResults}</h3>
-                    {Object.values(comparisonResults).every(val => val === 0) ? (
-                      <p className="text-gray-400">{t.noChangesDetected}</p>
-                    ) : (
-                      <ul className="space-y-2">
-                        {Object.entries(comparisonResults).map(([key, count]) => {
-                          if (count > 0) {
-                            let displayKey = key;
-                            if (key.startsWith('new_order_')) {
-                              displayKey = `${t.new_order} ${key.split('_')[2]})`;
-                            } else if (key.startsWith('removed_order_')) {
-                              displayKey = `${t.removed_order} ${key.split('_')[2]})`;
-                            } else if (STATUS_TRANSITIONS[key]) {
-                              displayKey = t[STATUS_TRANSITIONS[key]];
-                            } else {
-                              displayKey = key.replace(/_/g, ' ');
-                            }
-                            return (
-                              <li key={key} className="text-gray-200">
-                                <span className="font-semibold text-blue-300">{displayKey}:</span> {count} {t.orders}
-                              </li>
-                            );
-                          }
-                          return null;
-                        })}
-                      </ul>
-                    )}
-                  </div>
-                )}
-                {!comparisonResults && (compareImport1Id && compareImport2Id && compareImport1Id !== compareImport2Id) && (
-                  <p className="text-gray-400 text-center mt-8">{t.noComparisonSelected}</p>
-                )}
-              </CardContent>
-            </Card>
-          )}
-
-          {activeTab === 3 && (
-            <Card>
-              <CardContent>
                 <h2 className="text-2xl font-semibold mb-4 flex items-center gap-2 text-blue-400">
                   <Search className="w-6 h-6" /> {t.orderSearchTab}
                   <button
@@ -3869,108 +3908,75 @@ export default function ZakazkyDashboard() {
               </CardContent>
             </Card>
           )}
+          
+          {activeTab === 3 && (
+                <Card>
+                    <CardContent>
+                        <div className="flex justify-between items-center mb-4">
+                            <h2 className="text-2xl font-semibold">{t.dailySummary}</h2>
+                            <select 
+                                value={selectedDailySummaryDate} 
+                                onChange={(e) => setSelectedDailySummaryDate(e.target.value)} 
+                                className="p-2 rounded-md bg-gray-700 border border-gray-600 text-gray-100 focus:ring-blue-500 focus:border-blue-500"
+                            >
+                                {availableDatesForSummary.map(date => 
+                                    <option key={date} value={date}>{format(new Date(date), 'dd/MM/yyyy')}</option>
+                                )}
+                            </select>
+                        </div>
+                        {selectedDailySummaryDate && dailyStatusDistributionData.length > 0 ? (
+                            <div>
+                                <h3 className="text-xl font-semibold mt-6 mb-4">{t.statusDistribution}</h3>
+                                <ResponsiveContainer width="100%" height={300}>
+                                    <BarChart data={dailyStatusDistributionData}>
+                                        <XAxis dataKey="name" stroke="#E5E7EB" tick={{ fill: "#E5E7EB" }} />
+                                        <YAxis stroke="#E5E7EB" tick={{ fill: "#E5E7EB" }} allowDecimals={false} />
+                                        <Tooltip 
+                                            cursor={{ fill: 'rgba(255,255,255,0.1)' }}
+                                            contentStyle={{ backgroundColor: '#374151', border: 'none', borderRadius: '8px' }}
+                                            labelStyle={{ color: '#E5E7EB' }}
+                                            itemStyle={{ color: '#E5E7EB' }}
+                                        />
+                                        <Bar dataKey="value" fill={CHART_COLORS[2]} radius={[6, 6, 0, 0]} />
+                                    </BarChart>
+                                </ResponsiveContainer>
+                            </div>
+                        ) : (
+                            <div className="flex items-center justify-center h-40 bg-gray-700 text-gray-400 rounded-xl mt-4">
+                                <p className="text-lg">{t.noDataAvailable}</p>
+                            </div>
+                        )}
+                    </CardContent>
+                </Card>
+            )}
 
-          {activeTab === 4 && (
-            <Card>
-              <CardContent>
-                <h2 className="text-2xl font-semibold mb-4 flex items-center gap-2">
-                  <ClipboardList className="w-6 h-6 text-green-400" /> {t.dailySummary}
-                  <div className="ml-auto">
-                    <label htmlFor="daily-summary-date-select" className="sr-only">{t.selectDate}</label>
-                    <select
-                      id="daily-summary-date-select"
-                      value={selectedDailySummaryDate}
-                      onChange={(e) => setSelectedDailySummaryDate(e.target.value)}
-                      className="p-2 rounded-md bg-gray-700 border border-gray-600 text-gray-100 focus:ring-blue-500 focus:border-blue-500"
-                    >
-                      {availableDatesForSummary.length > 0 ? (
-                        availableDatesForSummary.map(date => (
-                          <option key={date} value={date}>
-                            {format(new Date(date), 'dd/MM/yyyy')}
-                          </option>
-                        ))
-                      ) : (
-                        <option value="">{t.noDataAvailable}</option>
-                      )}
-                    </select>
-                  </div>
-                </h2>
-                {selectedDailySummaryDate && summary?.dailySummaries ? (
-                  (() => {
-                    const currentDayStats = summary.dailySummaries.find(d => d.date === selectedDailySummaryDate);
-                    return currentDayStats ? (
-                      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7 gap-6">
-                        <Card>
-                          <CardContent>
-                            <p className="text-gray-400">{t.total}</p>
-                            <p className="text-3xl font-bold text-blue-400">{currentDayStats.total}</p>
-                          </CardContent>
-                        </Card>
-                        <Card>
-                          <CardContent>
-                            <p className="text-gray-400">{t.done}</p>
-                            <p className="text-3xl font-bold text-green-400">{currentDayStats.done}</p>
-                          </CardContent>
-                        </Card>
-                        <Card>
-                          <CardContent>
-                            <p className="text-gray-400">{t.remaining}</p>
-                            <p className="text-3xl font-bold text-yellow-400">{currentDayStats.remaining}</p>
-                          </CardContent>
-                        </Card>
-                        <Card>
-                          <CardContent>
-                            <p className="text-gray-400">{t.inProgress}</p>
-                            <p className="text-3xl font-bold text-orange-400">{currentDayStats.inProgress}</p>
-                          </CardContent>
-                        </Card>
-                        <Card>
-                          <CardContent>
-                            <p className="text-gray-400">{t.newOrders}</p>
-                            <p className="text-3xl font-bold text-purple-400">{currentDayStats.newOrders}</p>
-                          </CardContent>
-                        </Card>
-                        <Card>
-                          <CardContent>
-                            <p className="text-gray-400">{t.pallets}</p>
-                            <p className="text-3xl font-bold text-pink-400">{currentDayStats.pallets}</p>
-                          </CardContent>
-                        </Card>
-                        <Card>
-                          <CardContent>
-                            <p className="text-gray-400">{t.carton}</p>
-                            <p className="text-3xl font-bold text-cyan-400">{currentDayStats.cartons}</p>
-                          </CardContent>
-                        </Card>
-                      </div>
-                    ) : (
-                      <div className="flex items-center justify-center h-40 bg-gray-700 text-gray-400 rounded-xl">
-                        <p className="text-lg">{t.noDataAvailable} pro vybrané datum.</p>
-                      </div>
-                    );
-                  })()
-                ) : (
-                  <div className="flex items-center justify-center h-40 bg-gray-700 text-gray-400 rounded-xl">
-                    <p className="text-lg">{t.noDataAvailable}</p>
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-          )}
+
+          {activeTab === 4 && <AnnouncedLoadingsTab t={t} allOrdersData={allOrdersData} onSelectOrder={setSelectedOrderDetails} db={firestoreDb} appId={currentAppId} currentUser={currentUser} />}
 
           {activeTab === 5 && (
             <TicketsTab t={t} currentUser={currentUser} db={firestoreDb} allUsers={allUsers} appId={currentAppId} />
           )}
 
-          {activeTab === 6 && (
-            <ProfileSettingsTab t={t} currentUser={currentUser} currentUserProfile={currentUserProfile} updateUserProfile={updateUserProfile} db={firestoreDb} appId={currentAppId} />
-          )}
-
-          {activeTab === 7 && (
-            <ChatTab t={t} currentUser={currentUser} currentUserProfile={currentUserProfile} db={firestoreDb} appId={currentAppId} />
-          )}
         </div>
       )}
+
+      {/* Modální okno pro profil */}
+       {isProfileOpen && (
+           <Modal title={t.profileTab} onClose={() => setIsProfileOpen(false)}>
+               <ProfileSettingsTab t={t} currentUser={currentUser} currentUserProfile={currentUserProfile} updateUserProfile={updateUserProfile} db={firestoreDb} appId={currentAppId} />
+           </Modal>
+       )}
+
+      {/* Plovoucí okno pro chat */}
+       {isChatOpen && (
+           <div className="fixed bottom-0 right-20 w-96 h-[500px] bg-gray-800 rounded-t-lg shadow-2xl flex flex-col z-50">
+               <header className="bg-gray-900 p-3 rounded-t-lg flex justify-between items-center cursor-pointer">
+                   <h3 className="text-white font-semibold">{t.chatTab}</h3>
+                   <button onClick={() => setIsChatOpen(false)} className="text-gray-400 hover:text-white"><XCircle className="w-5 h-5"/></button>
+               </header>
+               <ChatTab t={t} currentUser={currentUser} currentUserProfile={currentUserProfile} db={firestoreDb} appId={currentAppId} />
+           </div>
+       )}
     </div>
   );
 }
