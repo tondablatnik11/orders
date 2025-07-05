@@ -108,7 +108,7 @@ const supabaseClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // Jednoduché Card komponenty pro konzistentní stylování (Tailwind CSS)
 const Card = ({ children, className = "", onClick }) => (
-  <div 
+  <div
     className={`p-4 border border-gray-700 rounded-xl mb-4 bg-gray-800 shadow-xl ${className} ${onClick ? 'cursor-pointer hover:bg-gray-700 transition-colors' : ''}`}
     onClick={onClick}
   >
@@ -510,8 +510,8 @@ const translations = {
     loadingAddedSuccess: "Loading added successfully!",
     loadingError: "Error adding loading:",
     loadingDetails: "Loading Details",
-    notifications: "Notifications",
-    messages: "Messages",
+    notifications: "Upozornění",
+    messages: "Zprávy",
     noNotifications: "No new notifications.",
     attachment: "Attachment",
     addAttachment: "Add Attachment",
@@ -1976,6 +1976,24 @@ export default function ZakazkyDashboard() {
     }
   };
 
+// Autentizace (Firebase Auth)
+  const handleLogin = async () => {
+    setLoginError("");
+    setRegisterMessage("");
+    if (!isFirebaseReady || !firebaseAuth) { // Check isFirebaseReady
+      console.error("Firebase Auth not initialized or ready.");
+      setLoginError("Firebase authentication service is not ready. Please wait a moment.");
+      return;
+    }
+    try {
+      await signInWithEmailAndPassword(firebaseAuth, username, password);
+      // onAuthStateChanged listener handles setting isAuthenticated and currentUser
+    } catch (error) {
+      console.error("Login error:", error.message);
+      setLoginError(t.loginError);
+    }
+  };
+
   const handleRegister = async () => {
     setLoginError("");
     setRegisterMessage("");
@@ -2448,7 +2466,7 @@ export default function ZakazkyDashboard() {
     }
   };
 
-  // Compare Imports (Placeholder for now, no actual comparison logic implemented)
+// Compare Imports (Placeholder for now, no actual comparison logic implemented)
   const handleCompareImports = () => {
     setComparisonResults({
       // Example results, replace with actual comparison logic
@@ -2970,7 +2988,6 @@ export default function ZakazkyDashboard() {
              <button onClick={() => setActiveTab(4)} className={`flex-shrink-0 w-full md:w-auto px-4 py-2.5 text-sm rounded-lg font-medium focus:outline-none ${activeTab === 4 ? 'bg-blue-600 text-white shadow' : 'text-blue-100 hover:bg-white/[0.12]'}`}>{t.announcedLoadingsTab}</button>
              <button onClick={() => setActiveTab(5)} className={`flex-shrink-0 w-full md:w-auto px-4 py-2.5 text-sm rounded-lg font-medium focus:outline-none ${activeTab === 5 ? 'bg-blue-600 text-white shadow' : 'text-blue-100 hover:bg-white/[0.12]'}`}>{t.ticketsTab}</button>
           </div>
-
           {/* Obsah záložek */}
           {activeTab === 0 && (
             <>
