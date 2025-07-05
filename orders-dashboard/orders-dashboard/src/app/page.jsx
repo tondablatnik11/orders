@@ -683,10 +683,10 @@ const translations = {
     loadingError: "Fehler beim Hinzufügen der Verladung:",
     loadingDetails: "Verladungsdetails",
     notifications: "Benachrichtigungen",
-    messages: "Nachrichten",
+    messages: "Zprávy",
     noNotifications: "Keine neuen Benachrichtigungen.",
     attachment: "Anhang",
-    addAttachment: "Anhang hinzufügen",
+    addAttachment: "Přidat přílohu",
   },
 };
 
@@ -1358,7 +1358,6 @@ const ChatTab = ({ t, currentUser, currentUserProfile, db, appId }) => {
     </Card>
   );
 };
-
 
 export default function ZakazkyDashboard() {
   // Stavy pro UI
