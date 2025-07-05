@@ -107,8 +107,11 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 const supabaseClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // Jednoduché Card komponenty pro konzistentní stylování (Tailwind CSS)
-const Card = ({ children, className = "" }) => (
-  <div className={`p-4 border border-gray-700 rounded-xl mb-4 bg-gray-800 shadow-xl ${className}`}>
+const Card = ({ children, className = "", onClick }) => (
+  <div 
+    className={`p-4 border border-gray-700 rounded-xl mb-4 bg-gray-800 shadow-xl ${className} ${onClick ? 'cursor-pointer hover:bg-gray-700 transition-colors' : ''}`}
+    onClick={onClick}
+  >
     {children}
   </div>
 );
