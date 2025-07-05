@@ -64,6 +64,10 @@ import {
   Bell, // Ikona pro notifikace
   Paperclip, // Ikona pro přílohy
   Ship, // Ikona pro avizované nakládky
+  ChevronDown,
+  ChevronRight,
+  PlusCircle,
+  MessageCircle,
 } from "lucide-react";
 // Import Supabase Client
 import { createClient } from '@supabase/supabase-js';
